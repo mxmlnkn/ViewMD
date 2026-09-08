@@ -40,6 +40,10 @@ typedef struct _MarkydEditor {
   /* Coalesce markdown re-rendering to idle to avoid invalidating GTK iterators. */
   guint markdown_idle_id;
 
+  /* Debounced full re-render after the text area width changed, so the space
+     reserved around child anchors matches the re-pinned widgets again. */
+  guint relayout_timeout_id;
+
   /* Scroll anchoring across resizes: offset of the line that sits at the top
      of the viewport plus the sub-line remainder, so a re-wrap can restore the
      exact same top-left position instead of ratcheting the view upwards. */
@@ -67,6 +71,9 @@ typedef struct _MarkydEditor {
   /* Text view size of the last "size-allocate" pass. */
   gint last_allocate_width;
   gint last_allocate_height;
+
+  /* Content width the flow widgets were last spanned to. */
+  gint last_span_width;
 
   /* True while the view is being re-laid out (guards anchor updates from the
      adjustments' own clamping during that pass). */

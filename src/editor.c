@@ -16,6 +16,7 @@ static gboolean on_leave_notify(GtkWidget *widget, GdkEventCrossing *event,
 static void on_text_view_destroyed(GtkWidget *widget, gpointer user_data);
 static void apply_markdown(MarkydEditor *self);
 static void schedule_markdown_apply(MarkydEditor *self);
+static gboolean relayout_timeout(gpointer user_data);
 static void render_image_widgets(MarkydEditor *self);
 static void render_table_widgets(MarkydEditor *self);
 static void render_frontmatter_widgets(MarkydEditor *self);
@@ -243,6 +244,24 @@ static gboolean resolve_image_source_path(MarkydEditor *self, const gchar *src,
 
   *out_path = path;
   return TRUE;
+}
+
+/* Text area width inside the text view margins, or 0 while the view is not
+   laid out yet. */
+static gint editor_content_width(MarkydEditor *self) {
+  GdkRectangle rect;
+  gint width;
+
+  if (!self || !self->text_view) {
+    return 0;
+  }
+  gtk_text_view_get_visible_rect(GTK_TEXT_VIEW(self->text_view), &rect);
+  width = rect.width - gtk_text_view_get_left_margin(GTK_TEXT_VIEW(self->text_view)) -
+          gtk_text_view_get_right_margin(GTK_TEXT_VIEW(self->text_view));
+  if (width < 320 || width > 2400) {
+    return 0;
+  }
+  return width;
 }
 
 static gint get_image_max_width(MarkydEditor *self) {
@@ -734,6 +753,106 @@ static void render_frontmatter_widgets(MarkydEditor *self) {
   }
 }
 
+/* Size request content width that makes a widget's total footprint (plus its
+   margins and CSS padding) exactly cover the given width. */
+static gint inset_total(GtkWidget *widget) {
+  GtkStyleContext *style;
+  GtkBorder padding = {0, 0, 0, 0};
+  gint inset;
+
+  inset = gtk_widget_get_margin_start(widget) + gtk_widget_get_margin_end(widget);
+  style = gtk_widget_get_style_context(widget);
+  gtk_style_context_get_padding(style, gtk_widget_get_state_flags(widget), &padding);
+  inset += padding.left + padding.right;
+  return inset;
+}
+
+static gint width_minus_widget_insets(GtkWidget *widget, gint width) {
+  return MAX(width - inset_total(widget), 120);
+}
+
+/* Fit the flow widgets (code blocks, tables, frontmatter) to the text area.
+   Child anchors are laid out at their natural size, so a size request is the
+   way to control their width; re-applying on size-allocate keeps them in sync
+   when the window is resized.
+
+   - Code blocks and frontmatter always span the text area.
+   - Tables are sized to their natural (unwrapped) width; only when that
+     exceeds the text area do they span it and their cells wrap.
+
+   Note this only re-pins the widgets' size requests. The space the text
+   layout reserved around an anchor only updates when the layout revalidates
+   the line, which after the child's first allocation happens only through a
+   buffer re-layout - hence the coalesced re-render in on_text_view_size_
+   allocate_before for width changes. */
+static void span_child_widgets_to_width(MarkydEditor *self, gint width) {
+  GtkTextIter iter;
+  GtkTextIter end;
+
+  if (!self || width <= 0) {
+    return;
+  }
+  self->last_span_width = width;
+
+  gtk_text_buffer_get_bounds(self->buffer, &iter, &end);
+  while (!gtk_text_iter_equal(&iter, &end)) {
+    GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(&iter);
+    if (anchor) {
+      GtkWidget *box = (GtkWidget *)g_object_get_data(
+          G_OBJECT(anchor), VIEWMD_CODE_WIDGET_DATA);
+      if (box) {
+        GtkWidget *scroll =
+            (GtkWidget *)g_object_get_data(G_OBJECT(box), "viewmd-code-scroll");
+        if (scroll) {
+          gtk_widget_set_size_request(scroll,
+                                      width_minus_widget_insets(box, width), -1);
+        }
+      }
+      GtkWidget *frontmatter = (GtkWidget *)g_object_get_data(
+          G_OBJECT(anchor), VIEWMD_FRONTMATTER_WIDGET_DATA);
+      if (frontmatter) {
+        gtk_widget_set_size_request(
+            frontmatter, width_minus_widget_insets(frontmatter, width), -1);
+      }
+      GtkWidget *table = (GtkWidget *)g_object_get_data(
+          G_OBJECT(anchor), VIEWMD_TABLE_WIDGET_DATA);
+      if (table) {
+        gint min_width = 0;
+        gint natural_width = 0;
+        GtkBorder padding = {0, 0, 0, 0};
+        gint outer;
+        gint natural_height = 0;
+        gint v_inset;
+        gint new_width;
+        gint new_height;
+
+        gtk_widget_get_preferred_width(table, &min_width, &natural_width);
+        (void)min_width;
+        /* The anchor slot is the widget's minimum size, so an explicit
+           request is needed to pin the natural (fit-to-content) width; the
+           text-area width only caps it. */
+        gtk_style_context_get_padding(gtk_widget_get_style_context(table),
+                                      gtk_widget_get_state_flags(table), &padding);
+        outer = MIN(natural_width, width);
+        new_width = width_minus_widget_insets(table, outer);
+        /* Pin the height for the final width explicitly: the wrapping cells
+           make the natural height a function of the width, and a stale
+           height from the pre-wrap measure leaves the table taller than the
+           space the text layout reserved (it then floats over the text
+           while scrolling). get_preferred_height_for_width takes the full
+           outer width and returns it incl. margins. */
+        gtk_widget_get_preferred_height_for_width(table, outer, NULL,
+                                                  &natural_height);
+        v_inset = gtk_widget_get_margin_top(table) +
+                  gtk_widget_get_margin_bottom(table) + padding.top + padding.bottom;
+        new_height = MAX(natural_height - v_inset, 1);
+        gtk_widget_set_size_request(table, new_width, new_height);
+      }
+    }
+    gtk_text_iter_forward_char(&iter);
+  }
+}
+
 static void render_code_block_widgets(MarkydEditor *self) {
   GtkTextIter iter;
   GtkTextIter end;
@@ -761,6 +880,8 @@ static void render_code_block_widgets(MarkydEditor *self) {
     }
     gtk_text_iter_forward_char(&iter);
   }
+
+  span_child_widgets_to_width(self, editor_content_width(self));
 }
 
 static void on_fold_toggle_clicked(GtkButton *button, gpointer user_data) {
@@ -831,6 +952,17 @@ static gboolean apply_markdown_idle(gpointer user_data) {
   return G_SOURCE_REMOVE;
 }
 
+/* Full re-render after the text area width stopped changing, so the space
+   reserved around child anchors matches the re-pinned widgets again. */
+static gboolean relayout_timeout(gpointer user_data) {
+  MarkydEditor *self = (MarkydEditor *)user_data;
+  self->relayout_timeout_id = 0;
+  if (!self->updating_tags) {
+    apply_markdown(self);
+  }
+  return G_SOURCE_REMOVE;
+}
+
 static void schedule_markdown_apply(MarkydEditor *self) {
   if (!self || self->updating_tags || self->markdown_idle_id != 0) {
     return;
@@ -861,6 +993,7 @@ MarkydEditor *markyd_editor_new(MarkydApp *app) {
   self->headings = g_ptr_array_new_with_free_func(viewmd_heading_free);
   self->updating_tags = FALSE;
   self->markdown_idle_id = 0;
+  self->relayout_timeout_id = 0;
   self->scroll_anchor_offset = 0;
   self->scroll_anchor_remainder = 0.0;
   self->scroll_anchor_valid = FALSE;
@@ -871,6 +1004,7 @@ MarkydEditor *markyd_editor_new(MarkydApp *app) {
   self->scroll_anchor_frozen = FALSE;
   self->last_allocate_width = 0;
   self->last_allocate_height = 0;
+  self->last_span_width = 0;
   self->in_resize_pass = FALSE;
   self->vadjustment = NULL;
 
@@ -1119,20 +1253,42 @@ static void on_text_view_size_allocate_before(GtkWidget *widget,
     }
   }
 
-  if (allocation->width != self->last_allocate_width ||
-      allocation->height != self->last_allocate_height) {
-    /* Runs before the default handler re-lays-out the view: capture the top
-       line while the pre-resize layout and adjustment are still intact. */
-    self->in_resize_pass = TRUE;
-    update_scroll_anchor(self);
-    self->last_allocate_width = allocation->width;
-    self->last_allocate_height = allocation->height;
+  {
+    gint prev_width = self->last_allocate_width;
+
+    if (allocation->width != self->last_allocate_width ||
+        allocation->height != self->last_allocate_height) {
+      /* Runs before the default handler re-lays-out the view: capture the top
+         line while the pre-resize layout and adjustment are still intact. */
+      self->in_resize_pass = TRUE;
+      update_scroll_anchor(self);
+      self->last_allocate_width = allocation->width;
+      self->last_allocate_height = allocation->height;
+    }
+
+    /* Span the flow widgets to the incoming width BEFORE the default handler
+       re-lays-out the view so the widgets track the window live. The space
+       the layout reserved around an anchor cannot heal from size requests
+       alone (see span_child_widgets_to_width), so re-render on a debounce
+       once the width stops changing; until then the previous line heights
+       stand. */
+    {
+      gint w = allocation->width -
+               gtk_text_view_get_left_margin(GTK_TEXT_VIEW(self->text_view)) -
+               gtk_text_view_get_right_margin(GTK_TEXT_VIEW(self->text_view));
+      if (w >= 320 && w <= 2400 && w != self->last_span_width) {
+        span_child_widgets_to_width(self, w);
+        if (prev_width != 0 && self->relayout_timeout_id == 0) {
+          self->relayout_timeout_id = g_timeout_add(150, relayout_timeout, self);
+        }
+      }
+    }
   }
 }
 
 static void on_text_view_size_allocate_after(GtkWidget *widget,
-                                             GtkAllocation *allocation,
-                                             gpointer user_data) {
+                                              GtkAllocation *allocation,
+                                              gpointer user_data) {
   MarkydEditor *self = (MarkydEditor *)user_data;
   (void)widget;
   (void)allocation;
@@ -1187,6 +1343,10 @@ void markyd_editor_free(MarkydEditor *self) {
   }
   g_free(self->source_content);
   g_free(self->file_path);
+  if (self->relayout_timeout_id != 0) {
+    g_source_remove(self->relayout_timeout_id);
+    self->relayout_timeout_id = 0;
+  }
   if (self->collapsed) {
     g_hash_table_destroy(self->collapsed);
     self->collapsed = NULL;

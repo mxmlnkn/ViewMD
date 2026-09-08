@@ -39,9 +39,15 @@ typedef struct _MarkydConfig {
   /* Remote image loading policy: "ask", "always", "never". */
   gchar *remote_images;
 
+  /* Table styling */
+  gchar *table_border_color;
+  gchar *table_row_even_background;
+  gchar *table_row_odd_background;
+
   /* Editor */
   gboolean line_numbers;
   gboolean word_wrap;
+  gboolean always_show_scrollbars;
 } MarkydConfig;
 
 /* Global config instance */

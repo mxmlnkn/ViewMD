@@ -64,6 +64,7 @@ static void on_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
 static void on_notebook_page_reordered(GtkNotebook *notebook, GtkWidget *child,
                                        guint page_num, gpointer user_data);
 static gboolean on_notebook_reassert_page(gpointer user_data);
+static void apply_scroll_policy(GtkWidget *scroll);
 static gboolean on_tab_label_button_press(GtkWidget *widget,
                                           GdkEventButton *event,
                                           gpointer user_data);
@@ -831,8 +832,7 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
   gtk_box_pack_start(GTK_BOX(main_box), self->paned, TRUE, TRUE, 0);
 
   self->toc_scroll = gtk_scrolled_window_new(NULL, NULL);
-  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(self->toc_scroll),
-                                 GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+  apply_scroll_policy(self->toc_scroll);
   gtk_widget_set_size_request(self->toc_scroll, 210, -1);
   self->toc_list = gtk_list_box_new();
   gtk_widget_set_hexpand(self->toc_list, TRUE);
@@ -1046,6 +1046,12 @@ static gboolean on_tab_label_button_press(GtkWidget *widget,
   return FALSE;
 }
 
+static void apply_scroll_policy(GtkWidget *scroll) {
+  GtkPolicyType policy = config->always_show_scrollbars ? GTK_POLICY_ALWAYS
+                                                        : GTK_POLICY_AUTOMATIC;
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), policy, policy);
+}
+
 static void on_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
                                     guint page_num, gpointer user_data) {
   MarkydWindow *self = (MarkydWindow *)user_data;
@@ -1124,8 +1130,7 @@ MarkydTab *markyd_window_new_tab(MarkydWindow *self) {
   tab = g_new0(MarkydTab, 1);
   tab->editor = markyd_editor_new(self->app);
   tab->scroll = gtk_scrolled_window_new(NULL, NULL);
-  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scroll),
-                                 GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+  apply_scroll_policy(tab->scroll);
   gtk_container_add(GTK_CONTAINER(tab->scroll),
                     markyd_editor_get_widget(tab->editor));
 
@@ -1370,6 +1375,8 @@ void markyd_window_apply_css(MarkydWindow *self) {
   const gchar *search_current_fg;
   const gchar *code_bg;
   const gchar *code_fg;
+  const gchar *table_even;
+  const gchar *table_odd;
 
   if (css) {
     gtk_style_context_remove_provider_for_screen(gdk_screen_get_default(),
@@ -1415,10 +1422,12 @@ void markyd_window_apply_css(MarkydWindow *self) {
 
   code_bg = config->code_background;
   code_fg = config->code_foreground;
+  table_even = config->table_row_even_background;
+  table_odd = config->table_row_odd_background;
 
   table_bg = bg;
   table_fg = fg;
-  table_border = sel_bg;
+  table_border = config->table_border_color;
 
   css_str = g_strdup_printf(
       "textview {"
@@ -1512,12 +1521,14 @@ void markyd_window_apply_css(MarkydWindow *self) {
       ".viewmd-table-cell." VIEWMD_TABLE_CELL_CURRENT_CLASS " label {"
       "  color: %s;"
       "}"
-      ".viewmd-code-block {"
-      "  background-color: %s;"
-      "  border-radius: 6px;"
-      "  padding: 6px 4px 6px 4px;"
-      "  margin: 8px 4px 8px 4px;"
-      "}"
+       ".viewmd-table, .viewmd-frontmatter { padding: 6px 8px 6px 8px; }"
+       ".viewmd-table-cell label, .viewmd-frontmatter .viewmd-table-cell label { padding: 6px 8px 6px 8px; }"
+       ".viewmd-code-outer { padding: 8px 4px 8px 4px; }"
+       ".viewmd-code-block {"
+       "  background-color: %s;"
+       "  border-radius: 6px;"
+       "  padding: 6px 4px 6px 4px;"
+       "}"
       ".viewmd-code-header {"
       "  background-color: %s;"
       "  color: %s;"
@@ -1586,6 +1597,9 @@ void markyd_window_apply_css(MarkydWindow *self) {
         ".viewmd-toc row:selected { background-color: %s; color: %s; }"
         ".viewmd-toc row.viewmd-toc-tab-active { background-color: %s; }"
         ".viewmd-code-block scrolledwindow { background-color: %s; }"
+        ".viewmd-table-cell.viewmd-table-row-even { background-color: %s; }"
+        ".viewmd-table-cell.viewmd-table-row-odd { background-color: %s; }"
+        ".viewmd-table-cell.viewmd-table-header-cell { background-color: %s; }"
         /* Tab close button: Adwaita's hover pill is nearly invisible on the
            tab background, so paint a contrasting one. */
         "notebook header tab button { background-image: none; "
@@ -1595,7 +1609,8 @@ void markyd_window_apply_css(MarkydWindow *self) {
         "notebook header tab button:hover { background-color: alpha(%s, 0.28); "
         "  color: %s; }"
         "notebook header tab button:active { background-color: alpha(%s, 0.5); }",
-        bg, fg, bg, code_bg, sel_bg, fg, code_bg, code_bg, fg, fg, fg, fg);
+        bg, fg, bg, code_bg, sel_bg, fg, code_bg, code_bg, table_even, table_odd,
+        table_even, fg, fg, fg, fg);
     gtk_css_provider_load_from_data(css_extra, css_extra_str, -1, NULL);
     g_free(css_extra_str);
     gtk_style_context_add_provider_for_screen(
@@ -1766,11 +1781,19 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
 }
 
 static void apply_settings_to_all_tabs(MarkydWindow *self) {
-  if (!self || !self->editor) {
+  if (!self || !self->tabs) {
     return;
   }
-  markdown_update_accent_tags(self->editor->buffer);
-  markyd_editor_refresh(self->editor);
+  for (guint i = 0; i < self->tabs->len; i++) {
+    MarkydTab *tab = (MarkydTab *)g_ptr_array_index(self->tabs, i);
+    if (tab && tab->scroll) {
+      apply_scroll_policy(tab->scroll);
+    }
+    if (tab && tab->editor) {
+      markdown_update_accent_tags(tab->editor->buffer);
+      markyd_editor_refresh(tab->editor);
+    }
+  }
   markyd_window_apply_css(self);
 }
 
@@ -2209,6 +2232,12 @@ static void add_section_label(GtkWidget *grid, gint *row, const gchar *text) {
   gtk_grid_attach(GTK_GRID(grid), label, 0, (*row)++, 2, 1);
 }
 
+static void on_always_scrollbars_toggled(GtkToggleButton *toggle,
+                                        gpointer user_data) {
+  (void)user_data;
+  config->always_show_scrollbars = gtk_toggle_button_get_active(toggle);
+}
+
 static GtkWidget *create_settings_dialog(MarkydWindow *win) {
   GtkWidget *dialog;
   GtkWidget *content;
@@ -2288,6 +2317,17 @@ static GtkWidget *create_settings_dialog(MarkydWindow *win) {
     gtk_grid_attach(GTK_GRID(grid), remote_combo, 1, row++, 1, 1);
   }
 
+  {
+    GtkWidget *scrollbars = gtk_check_button_new_with_label(
+        "Always show scrollbars");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(scrollbars),
+                                 config->always_show_scrollbars);
+    g_signal_connect(scrollbars, "toggled",
+                     G_CALLBACK(on_always_scrollbars_toggled), NULL);
+    gtk_widget_set_halign(scrollbars, GTK_ALIGN_START);
+    gtk_grid_attach(GTK_GRID(grid), scrollbars, 0, row++, 2, 1);
+  }
+
   label = gtk_label_new("Font:");
   gtk_widget_set_halign(label, GTK_ALIGN_END);
   gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
@@ -2339,6 +2379,12 @@ static GtkWidget *create_settings_dialog(MarkydWindow *win) {
   add_color_row(grid, &row, "Heading 2:", &config->h2_color, ui);
   add_color_row(grid, &row, "Heading 3:", &config->h3_color, ui);
   add_color_row(grid, &row, "List bullet:", &config->list_bullet_color, ui);
+
+  add_section_label(grid, &row, "Table");
+  add_color_row(grid, &row, "Border:", &config->table_border_color, ui);
+  add_color_row(grid, &row, "Even rows:", &config->table_row_even_background,
+                ui);
+  add_color_row(grid, &row, "Odd rows:", &config->table_row_odd_background, ui);
 
   gtk_widget_show_all(dialog);
 
