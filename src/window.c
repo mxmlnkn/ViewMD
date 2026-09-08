@@ -3,6 +3,7 @@
 #include "config.h"
 #include "editor.h"
 #include "markdown.h"
+#include <pango/pangocairo.h>
 
 typedef struct {
   gint start_offset;
@@ -1169,12 +1170,13 @@ void markyd_window_apply_css(MarkydWindow *self) {
   const gchar *sel_bg;
   const gchar *table_bg;
   const gchar *table_fg;
-  const gchar *table_header_bg;
   const gchar *table_border;
   const gchar *search_match_bg;
   const gchar *search_match_fg;
   const gchar *search_current_bg;
   const gchar *search_current_fg;
+  const gchar *code_bg;
+  const gchar *code_fg;
 
   if (css) {
     gtk_style_context_remove_provider_for_screen(gdk_screen_get_default(),
@@ -1182,19 +1184,27 @@ void markyd_window_apply_css(MarkydWindow *self) {
     g_object_unref(css);
   }
 
+  /* Let GTK draw decorations (titlebar, borders) in the matching color scheme. */
+  if (g_strcmp0(config->theme, "dark") == 0 ||
+      g_strcmp0(config->theme, "light") == 0) {
+    GtkSettings *gtk_settings = gtk_settings_get_default();
+    g_object_set(gtk_settings, "gtk-application-prefer-dark-theme",
+                 g_strcmp0(config->theme, "dark") == 0, NULL);
+  }
+
   css = gtk_css_provider_new();
 
   if (g_strcmp0(config->theme, "light") == 0) {
-    bg = "#ffffff";
-    fg = "#111111";
+    bg = config->background_color;
+    fg = config->text_color;
     sel_bg = "#cfe3ff";
     search_match_bg = "#fff3b0";
-    search_match_fg = "#111111";
+    search_match_fg = "#1f2328";
     search_current_bg = "#ffd166";
-    search_current_fg = "#111111";
+    search_current_fg = "#1f2328";
   } else if (g_strcmp0(config->theme, "dark") == 0) {
-    bg = "#1e1e1e";
-    fg = "#e8e8e8";
+    bg = config->background_color;
+    fg = config->text_color;
     sel_bg = "#264f78";
     search_match_bg = "#3e3a12";
     search_match_fg = "#f4f4e8";
@@ -1210,14 +1220,16 @@ void markyd_window_apply_css(MarkydWindow *self) {
     search_current_fg = "@theme_selected_fg_color";
   }
 
+  code_bg = config->code_background;
+  code_fg = config->code_foreground;
+
   table_bg = bg;
   table_fg = fg;
-  table_header_bg = table_bg;
   table_border = sel_bg;
 
   css_str = g_strdup_printf(
       "textview {"
-      "  font-family: '%s', 'Inter', 'Noto Sans', sans-serif;"
+      "  font-family: '%s', sans-serif;"
       "  font-size: %dpt;"
       "  padding: 0px;"
       "  background-color: %s;"
@@ -1239,14 +1251,58 @@ void markyd_window_apply_css(MarkydWindow *self) {
       "window {"
       "  background-color: %s;"
       "}"
+      "headerbar {"
+      "  background-color: %s;"
+      "  background-image: none;"
+      "  color: %s;"
+      "  border-bottom: 1px solid alpha(%s, 0.2);"
+      "}"
+      "headerbar label {"
+      "  color: %s;"
+      "}"
+      "headerbar button {"
+      "  background-image: none;"
+      "  color: %s;"
+      "  border-color: alpha(%s, 0.3);"
+      "}"
+      "notebook {"
+      "  background-color: %s;"
+      "  background-image: none;"
+      "}"
+      "notebook header {"
+      "  background-color: %s;"
+      "  background-image: none;"
+      "  border-bottom: 1px solid alpha(%s, 0.2);"
+      "}"
+      "notebook header tab {"
+      "  background-color: %s;"
+      "  background-image: none;"
+      "  color: %s;"
+      "  padding: 4px 12px 4px 12px;"
+      "  border: 1px solid alpha(%s, 0.15);"
+      "  border-radius: 4px 4px 0 0;"
+      "  margin-right: 1px;"
+      "}"
+      "notebook header tab:checked {"
+      "  background-color: %s;"
+      "  color: %s;"
+      "  border-color: alpha(%s, 0.3);"
+      "}"
+      "notebook header tab button {"
+      "  background-image: none;"
+      "  color: %s;"
+      "  border: none;"
+      "}"
       ".viewmd-table-cell {"
       "  background-color: %s;"
       "  border-style: solid;"
       "  border-width: 1px;"
       "  border-color: %s;"
+      "  color: %s;"
       "}"
       ".viewmd-table-header-cell {"
       "  background-color: %s;"
+      "  font-weight: bold;"
       "}"
       ".viewmd-table-cell label {"
       "  color: %s;"
@@ -1262,10 +1318,55 @@ void markyd_window_apply_css(MarkydWindow *self) {
       "}"
       ".viewmd-table-cell." VIEWMD_TABLE_CELL_CURRENT_CLASS " label {"
       "  color: %s;"
+      "}"
+      ".viewmd-code-block {"
+      "  background-color: %s;"
+      "  border-radius: 6px;"
+      "  padding: 6px 4px 6px 4px;"
+      "  margin: 8px 4px 8px 4px;"
+      "}"
+      ".viewmd-code-header {"
+      "  background-color: %s;"
+      "  color: %s;"
+      "  border-top-left-radius: 6px;"
+      "  border-top-right-radius: 6px;"
+      "  padding: 2px 8px 2px 8px;"
+      "}"
+      ".viewmd-code-header label {"
+      "  color: %s;"
+      "}"
+      ".viewmd-code-block textview {"
+      "  background-color: %s;"
+      "  color: %s;"
+      "  font-family: '%s', monospace;"
+      "  font-size: %dpt;"
+      "}"
+      ".viewmd-code-block textview text {"
+      "  background-color: %s;"
+      "  color: %s;"
+      "}"
+      ".viewmd-fold-toggle {"
+      "  background-color: transparent;"
+      "  border: none;"
+      "  padding: 0 4px 0 0;"
+      "  font-family: monospace;"
+      "  color: %s;"
+      "}"
+      ".viewmd-copy-button {"
+      "  background-color: transparent;"
+      "  border-radius: 4px;"
+      "  padding: 0 6px 0 6px;"
+      "  color: %s;"
+      "}"
+      ".viewmd-details-summary {"
+      "  font-weight: bold;"
       "}",
       config->font_family, config->font_size, bg, fg, fg, bg, fg, fg, sel_bg, bg,
-      bg, table_bg, table_border, table_header_bg, table_fg, search_match_bg,
-      search_match_fg, search_current_bg, search_current_fg);
+      bg, bg, fg, fg, fg, fg, fg, bg, bg, fg, bg, fg, fg, code_bg, fg, fg, fg,
+      table_bg, table_border, table_fg, table_bg, table_fg, search_match_bg,
+      search_match_fg, search_current_bg, search_current_fg, code_bg, code_bg,
+      code_fg, code_fg, code_bg, code_fg, config->code_font_family,
+      config->font_size, code_bg, code_fg, fg, fg);
 
   gtk_css_provider_load_from_data(css, css_str, -1, NULL);
   g_free(css_str);
@@ -1731,6 +1832,67 @@ static gboolean on_window_state_event(GtkWidget *widget,
   return FALSE;
 }
 
+typedef struct {
+  MarkydWindow *win;
+  GtkWidget *theme_combo;
+  GtkWidget *font_combo;
+  GtkWidget *code_font_combo;
+  GArray *color_rows; /* SettingsColorRow */
+} SettingsUi;
+
+typedef struct {
+  GtkWidget *button;
+  gchar **target;
+} SettingsColorRow;
+
+static void settings_ui_free(gpointer data) {
+  SettingsUi *ui = (SettingsUi *)data;
+  if (ui) {
+    if (ui->color_rows) {
+      g_array_free(ui->color_rows, TRUE);
+    }
+    g_free(ui);
+  }
+}
+
+static void populate_font_combo(GtkComboBoxText *combo, gboolean mono_only,
+                                const gchar *current) {
+  PangoFontMap *map;
+  PangoFontFamily **families = NULL;
+  gint n_families = 0;
+  gint select_index = 0;
+  gint index = 0;
+  gboolean found = FALSE;
+
+  map = pango_cairo_font_map_get_default();
+  if (!map) {
+    return;
+  }
+
+  pango_font_map_list_families(map, &families, &n_families);
+
+  for (gint i = 0; i < n_families; i++) {
+    const gchar *family_name = pango_font_family_get_name(families[i]);
+    if (mono_only && !pango_font_family_is_monospace(families[i])) {
+      continue;
+    }
+    gtk_combo_box_text_append_text(combo, family_name);
+    if (!found && g_strcmp0(family_name, current) == 0) {
+      select_index = index;
+      found = TRUE;
+    }
+    index++;
+  }
+
+  if (!found && current && current[0] != '\0') {
+    select_index = index;
+    gtk_combo_box_text_append_text(combo, current);
+  }
+  g_free(families);
+
+  gtk_combo_box_set_active(GTK_COMBO_BOX(combo), select_index);
+}
+
 static void on_font_size_changed(GtkSpinButton *spin, gpointer user_data) {
   (void)user_data;
   config->font_size = gtk_spin_button_get_value_as_int(spin);
@@ -1742,10 +1904,172 @@ static void on_font_family_changed(GtkComboBoxText *combo, gpointer user_data) {
   config->font_family = gtk_combo_box_text_get_active_text(combo);
 }
 
-static void on_theme_changed(GtkComboBoxText *combo, gpointer user_data) {
+static void on_code_font_family_changed(GtkComboBoxText *combo,
+                                        gpointer user_data) {
   (void)user_data;
+  g_free(config->code_font_family);
+  config->code_font_family = gtk_combo_box_text_get_active_text(combo);
+}
+
+static void on_theme_changed(GtkComboBoxText *combo, gpointer user_data) {
+  SettingsUi *ui = (SettingsUi *)user_data;
+
   g_free(config->theme);
   config->theme = gtk_combo_box_text_get_active_text(combo);
+
+  /* Switch the color palette to the newly selected theme. */
+  config_apply_theme_colors(config);
+  if (ui && ui->color_rows) {
+    for (guint i = 0; i < ui->color_rows->len; i++) {
+      SettingsColorRow *row =
+          &g_array_index(ui->color_rows, SettingsColorRow, i);
+      init_color_button(GTK_COLOR_BUTTON(row->button), *row->target);
+    }
+  }
+}
+
+static SettingsColorRow add_color_row(GtkWidget *grid, gint *row,
+                                      const gchar *label_text, gchar **target,
+                                      SettingsUi *ui) {
+  GtkWidget *label;
+  GtkWidget *btn;
+  SettingsColorRow color_row;
+
+  label = gtk_label_new(label_text);
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(grid), label, 0, *row, 1, 1);
+
+  btn = gtk_color_button_new();
+  init_color_button(GTK_COLOR_BUTTON(btn), *target);
+  gtk_widget_set_halign(btn, GTK_ALIGN_START);
+  g_signal_connect(btn, "color-set", G_CALLBACK(on_color_set), target);
+  gtk_grid_attach(GTK_GRID(grid), btn, 1, (*row)++, 1, 1);
+
+  color_row.button = btn;
+  color_row.target = target;
+  if (ui->color_rows) {
+    g_array_append_val(ui->color_rows, color_row);
+  }
+  return color_row;
+}
+
+static void add_section_label(GtkWidget *grid, gint *row, const gchar *text) {
+  GtkWidget *label = gtk_label_new(text);
+  gtk_widget_set_halign(label, GTK_ALIGN_START);
+  gtk_style_context_add_class(gtk_widget_get_style_context(label), "dim-label");
+  gtk_grid_attach(GTK_GRID(grid), label, 0, (*row)++, 2, 1);
+}
+
+static GtkWidget *create_settings_dialog(MarkydWindow *win) {
+  GtkWidget *dialog;
+  GtkWidget *content;
+  GtkWidget *grid;
+  GtkWidget *label;
+  GtkWidget *font_size_spin;
+  SettingsUi *ui;
+  gint row = 0;
+
+  ui = g_new0(SettingsUi, 1);
+  ui->win = win;
+  ui->color_rows = g_array_new(FALSE, FALSE, sizeof(SettingsColorRow));
+
+  dialog = gtk_dialog_new_with_buttons(
+      "ViewMD Settings", GTK_WINDOW(win->window),
+      GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, "_Cancel",
+      GTK_RESPONSE_CANCEL, "_Apply", GTK_RESPONSE_APPLY, "_OK",
+      GTK_RESPONSE_OK, NULL);
+  gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
+  g_signal_connect(dialog, "response", G_CALLBACK(on_settings_response), win);
+  g_object_set_data_full(G_OBJECT(dialog), "viewmd-settings-ui", ui,
+                         settings_ui_free);
+
+  gtk_window_set_default_size(GTK_WINDOW(dialog), 460, -1);
+
+  content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+  gtk_container_set_border_width(GTK_CONTAINER(content), 16);
+  gtk_widget_set_margin_bottom(content, 12);
+
+  grid = gtk_grid_new();
+  gtk_grid_set_row_spacing(GTK_GRID(grid), 10);
+  gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
+  gtk_container_add(GTK_CONTAINER(content), grid);
+
+  label = gtk_label_new("Theme:");
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
+
+  ui->theme_combo = gtk_combo_box_text_new();
+  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui->theme_combo), "dark");
+  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui->theme_combo), "light");
+  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui->theme_combo), "system");
+
+  if (g_strcmp0(config->theme, "light") == 0)
+    gtk_combo_box_set_active(GTK_COMBO_BOX(ui->theme_combo), 1);
+  else if (g_strcmp0(config->theme, "system") == 0)
+    gtk_combo_box_set_active(GTK_COMBO_BOX(ui->theme_combo), 2);
+  else
+    gtk_combo_box_set_active(GTK_COMBO_BOX(ui->theme_combo), 0);
+
+  g_signal_connect(ui->theme_combo, "changed", G_CALLBACK(on_theme_changed),
+                   ui);
+  gtk_widget_set_hexpand(ui->theme_combo, TRUE);
+  gtk_grid_attach(GTK_GRID(grid), ui->theme_combo, 1, row++, 1, 1);
+
+  label = gtk_label_new("Font:");
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
+
+  ui->font_combo = gtk_combo_box_text_new();
+  populate_font_combo(GTK_COMBO_BOX_TEXT(ui->font_combo), FALSE,
+                      config->font_family);
+  g_signal_connect(ui->font_combo, "changed", G_CALLBACK(on_font_family_changed),
+                   NULL);
+  gtk_widget_set_hexpand(ui->font_combo, TRUE);
+  gtk_grid_attach(GTK_GRID(grid), ui->font_combo, 1, row++, 1, 1);
+
+  label = gtk_label_new("Code font:");
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
+
+  ui->code_font_combo = gtk_combo_box_text_new();
+  populate_font_combo(GTK_COMBO_BOX_TEXT(ui->code_font_combo), TRUE,
+                      config->code_font_family);
+  g_signal_connect(ui->code_font_combo, "changed",
+                   G_CALLBACK(on_code_font_family_changed), NULL);
+  gtk_widget_set_hexpand(ui->code_font_combo, TRUE);
+  gtk_grid_attach(GTK_GRID(grid), ui->code_font_combo, 1, row++, 1, 1);
+
+  label = gtk_label_new("Font size:");
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
+
+  font_size_spin = gtk_spin_button_new_with_range(8, 48, 1);
+  gtk_spin_button_set_value(GTK_SPIN_BUTTON(font_size_spin), config->font_size);
+  g_signal_connect(font_size_spin, "value-changed",
+                   G_CALLBACK(on_font_size_changed), NULL);
+  gtk_grid_attach(GTK_GRID(grid), font_size_spin, 1, row++, 1, 1);
+
+  add_section_label(grid, &row, "Document");
+  add_color_row(grid, &row, "Background:", &config->background_color, ui);
+  add_color_row(grid, &row, "Text:", &config->text_color, ui);
+
+  add_section_label(grid, &row, "Code");
+  add_color_row(grid, &row, "Code block:", &config->code_background, ui);
+  add_color_row(grid, &row, "Code text:", &config->code_foreground, ui);
+  add_color_row(grid, &row, "Inline code:", &config->inline_code_background,
+                ui);
+  add_color_row(grid, &row, "Inline text:", &config->inline_code_foreground,
+                ui);
+
+  add_section_label(grid, &row, "Accents");
+  add_color_row(grid, &row, "Heading 1:", &config->h1_color, ui);
+  add_color_row(grid, &row, "Heading 2:", &config->h2_color, ui);
+  add_color_row(grid, &row, "Heading 3:", &config->h3_color, ui);
+  add_color_row(grid, &row, "List bullet:", &config->list_bullet_color, ui);
+
+  gtk_widget_show_all(dialog);
+
+  return dialog;
 }
 
 static gchar *rgba_to_hex(const GdkRGBA *rgba) {
@@ -1771,152 +2095,3 @@ static void on_color_set(GtkColorButton *btn, gpointer user_data) {
   *target = rgba_to_hex(&rgba);
 }
 
-static GtkWidget *create_settings_dialog(MarkydWindow *win) {
-  GtkWidget *dialog;
-  GtkWidget *content;
-  GtkWidget *grid;
-  GtkWidget *label;
-  GtkWidget *font_family_combo;
-  GtkWidget *font_size_spin;
-  GtkWidget *theme_combo;
-  GtkWidget *h1_color_btn;
-  GtkWidget *h2_color_btn;
-  GtkWidget *h3_color_btn;
-  GtkWidget *bullet_color_btn;
-  gint row = 0;
-
-  dialog = gtk_dialog_new_with_buttons(
-      "ViewMD Settings", GTK_WINDOW(win->window),
-      GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, "_Cancel",
-      GTK_RESPONSE_CANCEL, "_Apply", GTK_RESPONSE_APPLY, "_OK",
-      GTK_RESPONSE_OK, NULL);
-  gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
-  g_signal_connect(dialog, "response", G_CALLBACK(on_settings_response), win);
-
-  gtk_window_set_default_size(GTK_WINDOW(dialog), 400, -1);
-
-  content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
-  gtk_container_set_border_width(GTK_CONTAINER(content), 16);
-  gtk_widget_set_margin_bottom(content, 12);
-
-  grid = gtk_grid_new();
-  gtk_grid_set_row_spacing(GTK_GRID(grid), 12);
-  gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
-  gtk_container_add(GTK_CONTAINER(content), grid);
-
-  label = gtk_label_new("Theme:");
-  gtk_widget_set_halign(label, GTK_ALIGN_END);
-  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
-
-  theme_combo = gtk_combo_box_text_new();
-  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(theme_combo), "dark");
-  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(theme_combo), "light");
-  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(theme_combo), "system");
-
-  if (g_strcmp0(config->theme, "light") == 0)
-    gtk_combo_box_set_active(GTK_COMBO_BOX(theme_combo), 1);
-  else if (g_strcmp0(config->theme, "system") == 0)
-    gtk_combo_box_set_active(GTK_COMBO_BOX(theme_combo), 2);
-  else
-    gtk_combo_box_set_active(GTK_COMBO_BOX(theme_combo), 0);
-
-  g_signal_connect(theme_combo, "changed", G_CALLBACK(on_theme_changed), NULL);
-  gtk_widget_set_hexpand(theme_combo, TRUE);
-  gtk_grid_attach(GTK_GRID(grid), theme_combo, 1, row++, 1, 1);
-
-  label = gtk_label_new("Font:");
-  gtk_widget_set_halign(label, GTK_ALIGN_END);
-  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
-
-  font_family_combo = gtk_combo_box_text_new();
-  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(font_family_combo),
-                                 "Cantarell");
-  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(font_family_combo),
-                                 "Inter");
-  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(font_family_combo),
-                                 "Noto Sans");
-  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(font_family_combo),
-                                 "Ubuntu");
-  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(font_family_combo),
-                                 "Roboto");
-  gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(font_family_combo),
-                                 "Monospace");
-
-  {
-    gint font_idx = 0;
-    const gchar *fonts[] = {"Cantarell", "Inter",     "Noto Sans", "Ubuntu",
-                            "Roboto",    "Monospace", NULL};
-    for (gint i = 0; fonts[i]; i++) {
-      if (g_strcmp0(config->font_family, fonts[i]) == 0) {
-        font_idx = i;
-        break;
-      }
-    }
-    gtk_combo_box_set_active(GTK_COMBO_BOX(font_family_combo), font_idx);
-  }
-
-  g_signal_connect(font_family_combo, "changed",
-                   G_CALLBACK(on_font_family_changed), NULL);
-  gtk_widget_set_hexpand(font_family_combo, TRUE);
-  gtk_grid_attach(GTK_GRID(grid), font_family_combo, 1, row++, 1, 1);
-
-  label = gtk_label_new("Font Size:");
-  gtk_widget_set_halign(label, GTK_ALIGN_END);
-  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
-
-  font_size_spin = gtk_spin_button_new_with_range(8, 48, 1);
-  gtk_spin_button_set_value(GTK_SPIN_BUTTON(font_size_spin), config->font_size);
-  g_signal_connect(font_size_spin, "value-changed",
-                   G_CALLBACK(on_font_size_changed), NULL);
-  gtk_grid_attach(GTK_GRID(grid), font_size_spin, 1, row++, 1, 1);
-
-  {
-    GtkWidget *separator = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_grid_attach(GTK_GRID(grid), separator, 0, row++, 2, 1);
-  }
-
-  label = gtk_label_new("Heading 1:");
-  gtk_widget_set_halign(label, GTK_ALIGN_END);
-  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
-  h1_color_btn = gtk_color_button_new();
-  init_color_button(GTK_COLOR_BUTTON(h1_color_btn), config->h1_color);
-  gtk_widget_set_halign(h1_color_btn, GTK_ALIGN_START);
-  g_signal_connect(h1_color_btn, "color-set", G_CALLBACK(on_color_set),
-                   &config->h1_color);
-  gtk_grid_attach(GTK_GRID(grid), h1_color_btn, 1, row++, 1, 1);
-
-  label = gtk_label_new("Heading 2:");
-  gtk_widget_set_halign(label, GTK_ALIGN_END);
-  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
-  h2_color_btn = gtk_color_button_new();
-  init_color_button(GTK_COLOR_BUTTON(h2_color_btn), config->h2_color);
-  gtk_widget_set_halign(h2_color_btn, GTK_ALIGN_START);
-  g_signal_connect(h2_color_btn, "color-set", G_CALLBACK(on_color_set),
-                   &config->h2_color);
-  gtk_grid_attach(GTK_GRID(grid), h2_color_btn, 1, row++, 1, 1);
-
-  label = gtk_label_new("Heading 3:");
-  gtk_widget_set_halign(label, GTK_ALIGN_END);
-  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
-  h3_color_btn = gtk_color_button_new();
-  init_color_button(GTK_COLOR_BUTTON(h3_color_btn), config->h3_color);
-  gtk_widget_set_halign(h3_color_btn, GTK_ALIGN_START);
-  g_signal_connect(h3_color_btn, "color-set", G_CALLBACK(on_color_set),
-                   &config->h3_color);
-  gtk_grid_attach(GTK_GRID(grid), h3_color_btn, 1, row++, 1, 1);
-
-  label = gtk_label_new("List bullet:");
-  gtk_widget_set_halign(label, GTK_ALIGN_END);
-  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
-  bullet_color_btn = gtk_color_button_new();
-  init_color_button(GTK_COLOR_BUTTON(bullet_color_btn),
-                    config->list_bullet_color);
-  gtk_widget_set_halign(bullet_color_btn, GTK_ALIGN_START);
-  g_signal_connect(bullet_color_btn, "color-set", G_CALLBACK(on_color_set),
-                   &config->list_bullet_color);
-  gtk_grid_attach(GTK_GRID(grid), bullet_color_btn, 1, row++, 1, 1);
-
-  gtk_widget_show_all(dialog);
-
-  return dialog;
-}

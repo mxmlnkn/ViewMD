@@ -1273,35 +1273,41 @@ void markdown_init_tags(GtkTextBuffer *buffer) {
                              NULL);
   gtk_text_buffer_create_tag(buffer, TAG_STRIKE, "strikethrough", TRUE, NULL);
 
-  gtk_text_buffer_create_tag(buffer, TAG_CODE, "family", "Monospace",
-                             "background", "#3E4451", "foreground", "#E06C75",
-                             NULL);
+  gtk_text_buffer_create_tag(buffer, TAG_CODE, "family",
+                             config->code_font_family, "background",
+                             config->inline_code_background, "foreground",
+                             config->inline_code_foreground, NULL);
   gtk_text_buffer_create_tag(
-      buffer, TAG_CODE_BLOCK, "family", "Monospace", "foreground", "#ABB2BF",
-      "paragraph-background", "#2C313A", "left-margin", 24, "right-margin", 16,
-      NULL);
+      buffer, TAG_CODE_BLOCK, "family", config->code_font_family, "foreground",
+      config->code_foreground, "paragraph-background",
+      config->code_background, "left-margin", 24, "right-margin", 16, NULL);
 
-  gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_KW_A, "family", "Monospace",
-                             "foreground", config->h1_color, "weight",
-                             PANGO_WEIGHT_BOLD, NULL);
-  gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_KW_B, "family", "Monospace",
-                             "foreground", config->h2_color, "weight",
-                             PANGO_WEIGHT_BOLD, NULL);
-  gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_KW_C, "family", "Monospace",
-                             "foreground", config->h3_color, "weight",
-                             PANGO_WEIGHT_BOLD, NULL);
+  gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_KW_A, "family",
+                             config->code_font_family, "foreground",
+                             config->h1_color, "weight", PANGO_WEIGHT_BOLD,
+                             NULL);
+  gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_KW_B, "family",
+                             config->code_font_family, "foreground",
+                             config->h2_color, "weight", PANGO_WEIGHT_BOLD,
+                             NULL);
+  gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_KW_C, "family",
+                             config->code_font_family, "foreground",
+                             config->h3_color, "weight", PANGO_WEIGHT_BOLD,
+                             NULL);
   gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_LITERAL, "family",
-                             "Monospace", "foreground", config->h3_color, NULL);
+                             config->code_font_family, "foreground",
+                             config->inline_code_foreground, NULL);
 
   gtk_text_buffer_create_tag(buffer, TAG_QUOTE, "left-margin", 24, "style",
-                             PANGO_STYLE_ITALIC, "foreground", "#5C6370",
-                             "paragraph-background", "#2C313A", NULL);
+                             PANGO_STYLE_ITALIC, "foreground",
+                             config->text_color, "paragraph-background",
+                             config->code_background, NULL);
 
   gtk_text_buffer_create_tag(buffer, TAG_LIST, "left-margin", 28, NULL);
   gtk_text_buffer_create_tag(buffer, TAG_LIST_BULLET, "foreground",
                              config->list_bullet_color, NULL);
 
-  gtk_text_buffer_create_tag(buffer, TAG_LINK, "foreground", "#61AFEF",
+  gtk_text_buffer_create_tag(buffer, TAG_LINK, "foreground", "#2f81f7",
                              "underline", PANGO_UNDERLINE_SINGLE, NULL);
 
   gtk_text_buffer_create_tag(buffer, TAG_HRULE, "foreground", "#5C6370",
@@ -1309,14 +1315,17 @@ void markdown_init_tags(GtkTextBuffer *buffer) {
                              "pixels-above-lines", 6, "pixels-below-lines", 6,
                              NULL);
 
-  gtk_text_buffer_create_tag(buffer, TAG_TABLE, "family", "Monospace",
-                             "left-margin", 20, "right-margin", 12,
-                             "paragraph-background", "#2C313A", NULL);
-  gtk_text_buffer_create_tag(buffer, TAG_TABLE_HEADER, "family", "Monospace",
-                             "weight", PANGO_WEIGHT_BOLD, "foreground",
-                             config->h1_color, NULL);
-  gtk_text_buffer_create_tag(buffer, TAG_TABLE_SEPARATOR, "family", "Monospace",
-                             "foreground", "#5C6370", NULL);
+  gtk_text_buffer_create_tag(buffer, TAG_TABLE, "family",
+                             config->code_font_family, "left-margin", 20,
+                             "right-margin", 12, "paragraph-background",
+                             config->code_background, NULL);
+  gtk_text_buffer_create_tag(buffer, TAG_TABLE_HEADER, "family",
+                             config->code_font_family, "weight",
+                             PANGO_WEIGHT_BOLD, "foreground", config->h1_color,
+                             NULL);
+  gtk_text_buffer_create_tag(buffer, TAG_TABLE_SEPARATOR, "family",
+                             config->code_font_family, "foreground", "#5C6370",
+                             NULL);
 }
 
 void markdown_update_accent_tags(GtkTextBuffer *buffer) {
@@ -1350,23 +1359,50 @@ void markdown_update_accent_tags(GtkTextBuffer *buffer) {
   }
   tag = gtk_text_tag_table_lookup(table, MARKYD_TAG_CODE_KW_A);
   if (tag) {
-    g_object_set(tag, "foreground", config->h1_color, NULL);
+    g_object_set(tag, "family", config->code_font_family, "foreground",
+                 config->h1_color, NULL);
   }
   tag = gtk_text_tag_table_lookup(table, MARKYD_TAG_CODE_KW_B);
   if (tag) {
-    g_object_set(tag, "foreground", config->h2_color, NULL);
+    g_object_set(tag, "family", config->code_font_family, "foreground",
+                 config->h2_color, NULL);
   }
   tag = gtk_text_tag_table_lookup(table, MARKYD_TAG_CODE_KW_C);
   if (tag) {
-    g_object_set(tag, "foreground", config->h3_color, NULL);
+    g_object_set(tag, "family", config->code_font_family, "foreground",
+                 config->h3_color, NULL);
   }
   tag = gtk_text_tag_table_lookup(table, MARKYD_TAG_CODE_LITERAL);
   if (tag) {
-    g_object_set(tag, "foreground", config->h3_color, NULL);
+    g_object_set(tag, "family", config->code_font_family, "foreground",
+                 config->inline_code_foreground, NULL);
   }
   tag = gtk_text_tag_table_lookup(table, TAG_TABLE_HEADER);
   if (tag) {
-    g_object_set(tag, "foreground", config->h1_color, NULL);
+    g_object_set(tag, "family", config->code_font_family, "foreground",
+                 config->h1_color, NULL);
+  }
+  tag = gtk_text_tag_table_lookup(table, TAG_CODE);
+  if (tag) {
+    g_object_set(tag, "family", config->code_font_family, "foreground",
+                 config->inline_code_foreground, "background",
+                 config->inline_code_background, NULL);
+  }
+  tag = gtk_text_tag_table_lookup(table, TAG_CODE_BLOCK);
+  if (tag) {
+    g_object_set(tag, "family", config->code_font_family, "foreground",
+                 config->code_foreground, "paragraph-background",
+                 config->code_background, NULL);
+  }
+  tag = gtk_text_tag_table_lookup(table, TAG_QUOTE);
+  if (tag) {
+    g_object_set(tag, "foreground", config->text_color, "paragraph-background",
+                 config->code_background, NULL);
+  }
+  tag = gtk_text_tag_table_lookup(table, TAG_TABLE);
+  if (tag) {
+    g_object_set(tag, "family", config->code_font_family,
+                 "paragraph-background", config->code_background, NULL);
   }
 }
 
