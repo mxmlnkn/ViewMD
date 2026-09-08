@@ -12,7 +12,6 @@ typedef struct _MarkydApp {
   GtkApplication *gtk_app;
   MarkydWindow *window;
   MarkydEditor *editor;
-  gchar *current_file_path;
 } MarkydApp;
 
 /* Global app instance */
@@ -26,7 +25,7 @@ int markyd_app_run(MarkydApp *app, int argc, char **argv);
 /* Document management */
 gboolean markyd_app_open_file(MarkydApp *app, const gchar *path);
 
-/* Utility */
-const gchar *markyd_app_get_current_path(MarkydApp *app);
+/* Window title reflects the active tab's document. */
+void markyd_app_update_window_title(MarkydApp *app);
 
 #endif /* MARKYD_APP_H */
