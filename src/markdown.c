@@ -875,8 +875,7 @@ GtkWidget *markdown_create_code_block_widget(GtkTextChildAnchor *anchor) {
   GtkWidget *code_scroll;
   GtkTextBuffer *code_buffer;
   GtkWidget *code_view;
-  gint n_lines;
-  gint block_height;
+  GtkWidget *wrapper;
   const MarkydLanguageHighlight *language;
 
   if (!anchor) {
@@ -893,10 +892,6 @@ GtkWidget *markdown_create_code_block_widget(GtkTextChildAnchor *anchor) {
   gtk_widget_set_valign(box, GTK_ALIGN_START);
   gtk_widget_set_hexpand(box, TRUE);
   gtk_widget_set_vexpand(box, FALSE);
-  gtk_widget_set_margin_top(box, 8);
-  gtk_widget_set_margin_bottom(box, 8);
-  gtk_widget_set_margin_start(box, 4);
-  gtk_widget_set_margin_end(box, 4);
 
   header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
   gtk_style_context_add_class(gtk_widget_get_style_context(header),
@@ -918,41 +913,57 @@ GtkWidget *markdown_create_code_block_widget(GtkTextChildAnchor *anchor) {
                    code);
   gtk_box_pack_end(GTK_BOX(header), copy_button, FALSE, FALSE, 0);
 
-  code_buffer = create_highlighted_code_buffer(code, language);
+  /* md4c includes the block's trailing newline in the source; as a buffer
+     line it renders as a phantom extra line (in the default font) and gives
+     the block scroll room it must not have. */
+  {
+    gchar *trimmed = g_strdup(code ? code : "");
+    g_strchomp(trimmed);
+    code_buffer = create_highlighted_code_buffer(trimmed, language);
+    g_free(trimmed);
+  }
   code_view = gtk_text_view_new_with_buffer(code_buffer);
   code_widget_text_view_setup(GTK_TEXT_VIEW(code_view));
   g_object_unref(code_buffer);
 
-  /* Deterministic widget size so the text layout reserves exactly this much
-     vertical space (a natural-height request that later grows overlaps the
-     following lines and triggers negative-size allocations on re-layout).
-     Long lines scroll horizontally inside the block. */
-  n_lines = 1;
-  if (code) {
-    for (const gchar *p = code; *p; p++) {
-      if (*p == '\n') {
-        n_lines++;
-      }
-    }
-  }
-  block_height = n_lines * 24 + 8;
-  if (block_height > 260) {
-    block_height = 260;
-  }
-  if (block_height < 32) {
-    block_height = 32;
-  }
-
   code_scroll = gtk_scrolled_window_new(NULL, NULL);
-  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(code_scroll),
-                                 GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
   gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(code_scroll),
-                                      GTK_SHADOW_NONE);
-  gtk_widget_set_size_request(code_scroll, 480, block_height);
+                                       GTK_SHADOW_NONE);
+  /* The block always takes its full content height (no cap) so there is no
+     nested vertical scrolling to trap the wheel: the document scrolls code
+     the same way as any other content, and only wide lines scroll
+     horizontally. propagate_natural_height pins the height to the buffer's
+     natural height; the trailing-newline trim above keeps it exact. */
+  gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(code_scroll),
+                                                    TRUE);
+  gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(code_scroll), -1);
+  gtk_scrolled_window_set_policy(
+      GTK_SCROLLED_WINDOW(code_scroll),
+      config->always_show_scrollbars ? GTK_POLICY_ALWAYS : GTK_POLICY_AUTOMATIC,
+      GTK_POLICY_NEVER);
+  /* Width starts at a fixed value and is re-spanned to the text area width
+     once the view is laid out (see span_child_widgets_to_width). */
+  gtk_widget_set_size_request(code_scroll, 480, -1);
   gtk_container_add(GTK_CONTAINER(code_scroll), code_view);
   gtk_box_pack_start(GTK_BOX(box), code_scroll, FALSE, FALSE, 0);
+  g_object_set_data(G_OBJECT(box), "viewmd-code-scroll", code_scroll);
 
-  return box;
+  /* Outer spacing lives on a transparent wrapper, not as margins on the
+     card: GtkTextView transiently allocates child anchors at 1x1 while
+     scrolling, and margins are excluded from a widget's minimum size, so the
+     content area went negative and GTK warned. Padding is part of the minimum
+     size, and the wrapper has no background, so this is visually identical. */
+  wrapper = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_style_context_add_class(gtk_widget_get_style_context(wrapper),
+                              "viewmd-code-outer");
+  gtk_widget_set_halign(wrapper, GTK_ALIGN_FILL);
+  gtk_widget_set_valign(wrapper, GTK_ALIGN_START);
+  gtk_widget_set_hexpand(wrapper, TRUE);
+  gtk_widget_set_vexpand(wrapper, FALSE);
+  gtk_box_pack_start(GTK_BOX(wrapper), box, FALSE, FALSE, 0);
+  g_object_set_data(G_OBJECT(wrapper), "viewmd-code-scroll", code_scroll);
+
+  return wrapper;
 }
 
 static void emit_code_block_anchor(RenderCtx *ctx) {
@@ -2064,10 +2075,6 @@ GtkWidget *markdown_create_table_widget(GtkTextChildAnchor *anchor) {
   gtk_style_context_add_class(gtk_widget_get_style_context(wrapper),
                               "viewmd-table");
   gtk_widget_set_halign(wrapper, GTK_ALIGN_START);
-  gtk_widget_set_margin_top(wrapper, 6);
-  gtk_widget_set_margin_bottom(wrapper, 6);
-  gtk_widget_set_margin_start(wrapper, 8);
-  gtk_widget_set_margin_end(wrapper, 8);
 
   grid = gtk_grid_new();
   gtk_style_context_add_class(gtk_widget_get_style_context(grid),
@@ -2103,6 +2110,10 @@ GtkWidget *markdown_create_table_widget(GtkTextChildAnchor *anchor) {
       if (row->is_header) {
         gtk_style_context_add_class(gtk_widget_get_style_context(cell),
                                     "viewmd-table-header-cell");
+      } else {
+        gtk_style_context_add_class(
+            gtk_widget_get_style_context(cell),
+            (r % 2) == 0 ? "viewmd-table-row-even" : "viewmd-table-row-odd");
       }
       g_object_set_data(G_OBJECT(cell), VIEWMD_TABLE_CELL_ROW_DATA,
                         GINT_TO_POINTER((gint)r));
@@ -2110,18 +2121,16 @@ GtkWidget *markdown_create_table_widget(GtkTextChildAnchor *anchor) {
                         GINT_TO_POINTER((gint)c));
       gtk_style_context_add_class(gtk_widget_get_style_context(label),
                                   "viewmd-table-label");
-      gtk_widget_set_hexpand(cell, FALSE);
+      gtk_widget_set_hexpand(cell, TRUE);
       gtk_widget_set_vexpand(cell, FALSE);
       gtk_container_add(GTK_CONTAINER(cell), label);
 
+      /* Wrap cell content so the table stays inside the viewport instead of
+         overflowing into unreachable width. */
       gtk_label_set_xalign(GTK_LABEL(label), align_to_xalign(align));
       gtk_label_set_yalign(GTK_LABEL(label), 0.5f);
-      gtk_label_set_line_wrap(GTK_LABEL(label), FALSE);
-      gtk_label_set_selectable(GTK_LABEL(label), FALSE);
-      gtk_widget_set_margin_start(label, 8);
-      gtk_widget_set_margin_end(label, 8);
-      gtk_widget_set_margin_top(label, row->is_header ? 6 : 5);
-      gtk_widget_set_margin_bottom(label, row->is_header ? 6 : 5);
+      gtk_label_set_line_wrap(GTK_LABEL(label), TRUE);
+      gtk_label_set_selectable(GTK_LABEL(label), TRUE);
 
       if (row->is_header) {
         markup = g_strdup_printf("<b>%s</b>", text);
@@ -2188,7 +2197,7 @@ static GtkWidget *frontmatter_cell(const gchar *text, gboolean header) {
     gtk_style_context_add_class(gtk_widget_get_style_context(cell),
                                 "viewmd-table-header-cell");
   }
-  gtk_widget_set_hexpand(cell, FALSE);
+  gtk_widget_set_hexpand(cell, TRUE);
   gtk_widget_set_vexpand(cell, FALSE);
   gtk_container_add(GTK_CONTAINER(cell), label);
 
@@ -2196,10 +2205,7 @@ static GtkWidget *frontmatter_cell(const gchar *text, gboolean header) {
                               "viewmd-table-label");
   gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
   gtk_label_set_yalign(GTK_LABEL(label), 0.5f);
-  gtk_widget_set_margin_start(label, 8);
-  gtk_widget_set_margin_end(label, 8);
-  gtk_widget_set_margin_top(label, header ? 6 : 5);
-  gtk_widget_set_margin_bottom(label, header ? 6 : 5);
+  gtk_label_set_line_wrap(GTK_LABEL(label), TRUE);
   gtk_label_set_text(GTK_LABEL(label), text);
 
   return cell;
@@ -2222,10 +2228,6 @@ GtkWidget *markdown_create_frontmatter_widget(GtkTextChildAnchor *anchor) {
   gtk_style_context_add_class(gtk_widget_get_style_context(wrapper),
                               "viewmd-table");
   gtk_widget_set_halign(wrapper, GTK_ALIGN_START);
-  gtk_widget_set_margin_top(wrapper, 6);
-  gtk_widget_set_margin_bottom(wrapper, 6);
-  gtk_widget_set_margin_start(wrapper, 8);
-  gtk_widget_set_margin_end(wrapper, 8);
 
   grid = gtk_grid_new();
   gtk_style_context_add_class(gtk_widget_get_style_context(grid),

@@ -45,6 +45,15 @@ void config_apply_theme_colors(MarkydConfig *cfg) {
   cfg->list_bullet_color =
       g_strdup(theme_default_str(theme, "#e6edf3", "#1f2328"));
 
+  g_free(cfg->table_border_color);
+  cfg->table_border_color = g_strdup(theme_default_str(theme, "#ffffff", "#1f2328"));
+  g_free(cfg->table_row_even_background);
+  cfg->table_row_even_background =
+      g_strdup(theme_default_str(theme, "#000000", "#ffffff"));
+  g_free(cfg->table_row_odd_background);
+  cfg->table_row_odd_background =
+      g_strdup(theme_default_str(theme, "#161616", "#f6f8fa"));
+
 
   (void)light;
 }
@@ -69,6 +78,7 @@ MarkydConfig *config_new(void) {
 
   cfg->line_numbers = FALSE;
   cfg->word_wrap = TRUE;
+  cfg->always_show_scrollbars = TRUE;
 
   return cfg;
 }
@@ -89,6 +99,9 @@ void config_free(MarkydConfig *cfg) {
   g_free(cfg->h2_color);
   g_free(cfg->h3_color);
   g_free(cfg->list_bullet_color);
+  g_free(cfg->table_border_color);
+  g_free(cfg->table_row_even_background);
+  g_free(cfg->table_row_odd_background);
   g_free(cfg->remote_images);
   g_free(cfg);
 }
@@ -218,10 +231,29 @@ gboolean config_load(MarkydConfig *cfg) {
         g_key_file_get_string(keyfile, "Appearance", "remote_images", NULL);
   }
 
+  if (g_key_file_has_key(keyfile, "Table", "border_color", NULL)) {
+    g_free(cfg->table_border_color);
+    cfg->table_border_color =
+        g_key_file_get_string(keyfile, "Table", "border_color", NULL);
+  }
+  if (g_key_file_has_key(keyfile, "Table", "row_even_background", NULL)) {
+    g_free(cfg->table_row_even_background);
+    cfg->table_row_even_background =
+        g_key_file_get_string(keyfile, "Table", "row_even_background", NULL);
+  }
+  if (g_key_file_has_key(keyfile, "Table", "row_odd_background", NULL)) {
+    g_free(cfg->table_row_odd_background);
+    cfg->table_row_odd_background =
+        g_key_file_get_string(keyfile, "Table", "row_odd_background", NULL);
+  }
+
   /* Editor */
   if (g_key_file_has_key(keyfile, "Editor", "word_wrap", NULL))
     cfg->word_wrap =
         g_key_file_get_boolean(keyfile, "Editor", "word_wrap", NULL);
+  if (g_key_file_has_key(keyfile, "Editor", "always_show_scrollbars", NULL))
+    cfg->always_show_scrollbars = g_key_file_get_boolean(
+        keyfile, "Editor", "always_show_scrollbars", NULL);
 
   g_key_file_free(keyfile);
   return TRUE;
@@ -251,6 +283,13 @@ gboolean config_save(MarkydConfig *cfg) {
   g_key_file_set_integer(keyfile, "Appearance", "font_size", cfg->font_size);
   g_key_file_set_string(keyfile, "Appearance", "theme", cfg->theme);
 
+  g_key_file_set_string(keyfile, "Table", "border_color",
+                        cfg->table_border_color);
+  g_key_file_set_string(keyfile, "Table", "row_even_background",
+                        cfg->table_row_even_background);
+  g_key_file_set_string(keyfile, "Table", "row_odd_background",
+                        cfg->table_row_odd_background);
+
   /* Colors */
   g_key_file_set_string(keyfile, "Colors", "background_color",
                         cfg->background_color);
@@ -275,6 +314,8 @@ gboolean config_save(MarkydConfig *cfg) {
 
   /* Editor */
   g_key_file_set_boolean(keyfile, "Editor", "word_wrap", cfg->word_wrap);
+  g_key_file_set_boolean(keyfile, "Editor", "always_show_scrollbars",
+                         cfg->always_show_scrollbars);
 
   data = g_key_file_to_data(keyfile, &length, &error);
   if (error) {
