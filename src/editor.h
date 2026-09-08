@@ -3,6 +3,11 @@
 
 #include <gtk/gtk.h>
 
+/* Search-highlight tags; created on every tab's buffer so Ctrl+F is not
+   limited to the first tab. */
+#define TAG_SEARCH_MATCH "viewmd_search_match"
+#define TAG_SEARCH_CURRENT "viewmd_search_current"
+
 typedef struct _MarkydApp MarkydApp;
 
 typedef struct _MarkydEditor {
@@ -12,6 +17,9 @@ typedef struct _MarkydEditor {
 
   /* Original markdown content loaded into the viewer. */
   gchar *source_content;
+
+  /* Absolute path of the document shown in this editor, or NULL. */
+  gchar *file_path;
 
   /* Prevent recursive tag application. */
   gboolean updating_tags;
@@ -27,6 +35,10 @@ void markyd_editor_free(MarkydEditor *editor);
 /* Content management */
 void markyd_editor_set_content(MarkydEditor *editor, const gchar *content);
 gchar *markyd_editor_get_content(MarkydEditor *editor);
+
+/* Document path handling (used for relative image/link resolution). */
+void markyd_editor_set_file_path(MarkydEditor *editor, const gchar *path);
+const gchar *markyd_editor_get_file_path(MarkydEditor *editor);
 
 /* Widget access */
 GtkWidget *markyd_editor_get_widget(MarkydEditor *editor);

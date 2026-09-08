@@ -12,9 +12,6 @@ typedef struct {
   gint table_col;
 } SearchMatch;
 
-#define TAG_SEARCH_MATCH "viewmd_search_match"
-#define TAG_SEARCH_CURRENT "viewmd_search_current"
-
 static void on_open_clicked(GtkButton *button, gpointer user_data);
 static void on_refresh_clicked(GtkButton *button, gpointer user_data);
 static void on_settings_clicked(GtkButton *button, gpointer user_data);
@@ -61,6 +58,18 @@ static gboolean on_window_state_event(GtkWidget *widget,
                                       GdkEventWindowState *event,
                                       gpointer user_data);
 static void on_window_destroyed(GtkWidget *widget, gpointer user_data);
+static void on_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
+                                    guint page_num, gpointer user_data);
+static void on_notebook_page_reordered(GtkNotebook *notebook, GtkWidget *child,
+                                       guint page_num, gpointer user_data);
+static gboolean on_notebook_reassert_page(gpointer user_data);
+static gboolean on_tab_label_button_press(GtkWidget *widget,
+                                          GdkEventButton *event,
+                                          gpointer user_data);
+static void on_tab_close_clicked(GtkButton *button, gpointer user_data);
+static gboolean update_tab_label(MarkydWindow *self, MarkydTab *tab);
+static gboolean load_document_into_tab(MarkydWindow *self, MarkydTab *tab,
+                                       const gchar *path);
 
 static void on_font_size_changed(GtkSpinButton *spin, gpointer user_data);
 static void on_font_family_changed(GtkComboBoxText *combo, gpointer user_data);
@@ -107,26 +116,32 @@ static void update_search_tag_styles(MarkydWindow *self, const gchar *match_bg,
                                      const gchar *match_fg,
                                      const gchar *current_bg,
                                      const gchar *current_fg) {
-  GtkTextTagTable *table;
-  GtkTextTag *tag;
-
-  if (!self || !self->editor || !self->editor->buffer) {
+  if (!self || !self->tabs) {
     return;
   }
 
-  table = gtk_text_buffer_get_tag_table(self->editor->buffer);
-  if (!table) {
-    return;
-  }
+  for (guint i = 0; i < self->tabs->len; i++) {
+    MarkydTab *tab = g_ptr_array_index(self->tabs, i);
+    GtkTextTagTable *table;
+    GtkTextTag *tag;
 
-  tag = gtk_text_tag_table_lookup(table, TAG_SEARCH_MATCH);
-  if (tag) {
-    g_object_set(tag, "background", match_bg, "foreground", match_fg, NULL);
-  }
+    if (!tab || !tab->editor || !tab->editor->buffer) {
+      continue;
+    }
+    table = gtk_text_buffer_get_tag_table(tab->editor->buffer);
+    if (!table) {
+      continue;
+    }
 
-  tag = gtk_text_tag_table_lookup(table, TAG_SEARCH_CURRENT);
-  if (tag) {
-    g_object_set(tag, "background", current_bg, "foreground", current_fg, NULL);
+    tag = gtk_text_tag_table_lookup(table, TAG_SEARCH_MATCH);
+    if (tag) {
+      g_object_set(tag, "background", match_bg, "foreground", match_fg, NULL);
+    }
+
+    tag = gtk_text_tag_table_lookup(table, TAG_SEARCH_CURRENT);
+    if (tag) {
+      g_object_set(tag, "background", current_bg, "foreground", current_fg, NULL);
+    }
   }
 }
 
@@ -191,8 +206,9 @@ static gboolean scroll_to_table_cell(MarkydWindow *self, GtkWidget *cell) {
   GtkAllocation alloc;
   GtkAdjustment *hadj;
   GtkAdjustment *vadj;
+  GtkWidget *scroll = markyd_window_get_active_tab(self) ? markyd_window_get_active_tab(self)->scroll : NULL;
 
-  if (!self || !cell || !self->editor || !self->editor->text_view || !self->scroll) {
+  if (!self || !cell || !self->editor || !self->editor->text_view || !scroll) {
     return FALSE;
   }
 
@@ -202,8 +218,8 @@ static gboolean scroll_to_table_cell(MarkydWindow *self, GtkWidget *cell) {
   }
 
   gtk_widget_get_allocation(cell, &alloc);
-  hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(self->scroll));
-  vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(self->scroll));
+  hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(scroll));
+  vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(scroll));
   doc_x = x + (hadj ? gtk_adjustment_get_value(hadj) : 0.0);
   doc_y = y + (vadj ? gtk_adjustment_get_value(vadj) : 0.0);
 
@@ -630,9 +646,13 @@ static gboolean on_search_entry_key_press(GtkWidget *widget, GdkEventKey *event,
 
 static void on_editor_buffer_changed(GtkTextBuffer *buffer, gpointer user_data) {
   MarkydWindow *self = (MarkydWindow *)user_data;
-  (void)buffer;
 
   if (!self || !self->search_revealer || !self->search_entry) {
+    return;
+  }
+
+  /* Only the active tab's buffer drives the search UI. */
+  if (self->editor && self->editor->buffer != buffer) {
     return;
   }
 
@@ -781,31 +801,26 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
   gtk_widget_set_halign(self->lbl_search_status, GTK_ALIGN_END);
   gtk_box_pack_start(GTK_BOX(search_box), self->lbl_search_status, FALSE, FALSE, 0);
 
-  self->scroll = gtk_scrolled_window_new(NULL, NULL);
-  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(self->scroll),
-                                 GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-  gtk_box_pack_start(GTK_BOX(main_box), self->scroll, TRUE, TRUE, 0);
+  self->notebook = gtk_notebook_new();
+  gtk_notebook_set_scrollable(GTK_NOTEBOOK(self->notebook), TRUE);
+  gtk_notebook_set_show_border(GTK_NOTEBOOK(self->notebook), FALSE);
+  g_signal_connect(self->notebook, "switch-page",
+                   G_CALLBACK(on_notebook_switch_page), self);
+  g_signal_connect(self->notebook, "page-reordered",
+                   G_CALLBACK(on_notebook_page_reordered), self);
+  /* GTK marks the notebook back to page 0 when it is first realized/painted,
+     which demotes a document opened at startup (CLI) to the first tab.
+     Re-assert the desired page once the window has been shown. */
+  g_idle_add(on_notebook_reassert_page, self);
+  gtk_box_pack_start(GTK_BOX(main_box), self->notebook, TRUE, TRUE, 0);
 
-  self->editor = markyd_editor_new(app);
-  gtk_container_add(GTK_CONTAINER(self->scroll),
-                    markyd_editor_get_widget(self->editor));
-  g_signal_connect(self->editor->text_view, "scroll-event",
-                   G_CALLBACK(on_text_view_scroll), self);
-
-  /* The text view registers its own drop target (text/plain), stealing file
-     drops in the document area from the window; let the window handle them.
-     gtk_drag_dest_unset warns unless the widget is currently a destination,
-     so only unset what was set. */
-  if (gtk_drag_dest_get_target_list(self->editor->text_view) != NULL) {
-    gtk_drag_dest_unset(self->editor->text_view);
-  }
-  if (gtk_drag_dest_get_target_list(self->scroll) != NULL) {
-    gtk_drag_dest_unset(self->scroll);
-  }
+  self->tabs = g_ptr_array_new_with_free_func(NULL);
+  self->active_index = -1;
   self->search_matches = g_array_new(FALSE, FALSE, sizeof(SearchMatch));
   self->search_current_index = -1;
-  g_signal_connect(self->editor->buffer, "changed",
-                   G_CALLBACK(on_editor_buffer_changed), self);
+
+  markyd_window_new_tab(self);
+
   ensure_search_tags(self);
 
   markyd_window_apply_css(self);
@@ -813,6 +828,337 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
   gtk_widget_show_all(self->window);
 
   return self;
+}
+
+static gboolean on_notebook_reassert_page(gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+
+  if (self && self->notebook && self->active_index >= 0 &&
+      self->active_index < (gint)self->tabs->len) {
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(self->notebook),
+                                  self->active_index);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+static gboolean on_tab_label_button_press(GtkWidget *widget,
+                                          GdkEventButton *event,
+                                          gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+  MarkydTab *tab;
+
+  if (event->button != GDK_BUTTON_MIDDLE) {
+    return FALSE;
+  }
+
+  tab = g_object_get_data(G_OBJECT(widget), "viewmd-tab");
+  if (tab) {
+    markyd_window_close_tab(self, tab);
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static void on_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
+                                    guint page_num, gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+  MarkydTab *tab;
+
+  (void)notebook;
+  (void)page;
+
+  if (!self || page_num >= self->tabs->len) {
+    return;
+  }
+
+  tab = g_ptr_array_index(self->tabs, page_num);
+  if (self->editor != tab->editor) {
+    clear_search_matches(self);
+    if (self->search_revealer &&
+        gtk_revealer_get_reveal_child(GTK_REVEALER(self->search_revealer))) {
+      hide_search_ui(self);
+    }
+  }
+  self->active_index = (gint)page_num;
+  self->editor = tab->editor;
+  markyd_app_update_window_title(self->app);
+}
+
+static void on_notebook_page_reordered(GtkNotebook *notebook, GtkWidget *child,
+                                       guint page_num, gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+  MarkydTab *tab = NULL;
+  guint old_index = 0;
+
+  if (!self || !self->tabs) {
+    return;
+  }
+  for (guint i = 0; i < self->tabs->len; i++) {
+    MarkydTab *candidate = g_ptr_array_index(self->tabs, i);
+    if (candidate && candidate->scroll == child) {
+      tab = candidate;
+      old_index = i;
+      break;
+    }
+  }
+  if (!tab) {
+    return;
+  }
+  g_ptr_array_remove_index(self->tabs, old_index);
+  g_ptr_array_insert(self->tabs, (gint)page_num, tab);
+  self->active_index = gtk_notebook_get_current_page(notebook);
+  if (self->active_index >= 0 && self->active_index < (gint)self->tabs->len) {
+    self->editor =
+        ((MarkydTab *)g_ptr_array_index(self->tabs, (guint)self->active_index))
+            ->editor;
+  }
+}
+
+static void on_tab_close_clicked(GtkButton *button, gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+  MarkydTab *tab;
+
+  tab = g_object_get_data(G_OBJECT(button), "viewmd-tab");
+  if (tab) {
+    markyd_window_close_tab(self, tab);
+  }
+}
+
+MarkydTab *markyd_window_new_tab(MarkydWindow *self) {
+  MarkydTab *tab;
+  GtkWidget *label_box;
+  GtkWidget *label;
+  GtkWidget *close_button;
+  gint page;
+
+  tab = g_new0(MarkydTab, 1);
+  tab->editor = markyd_editor_new(self->app);
+  tab->scroll = gtk_scrolled_window_new(NULL, NULL);
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scroll),
+                                 GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+  gtk_container_add(GTK_CONTAINER(tab->scroll),
+                    markyd_editor_get_widget(tab->editor));
+
+  label_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+  label = gtk_label_new("Untitled");
+  gtk_box_pack_start(GTK_BOX(label_box), label, FALSE, FALSE, 0);
+  close_button = gtk_button_new_from_icon_name("window-close-symbolic",
+                                               GTK_ICON_SIZE_MENU);
+  gtk_button_set_relief(GTK_BUTTON(close_button), GTK_RELIEF_NONE);
+  gtk_widget_set_focus_on_click(close_button, FALSE);
+  gtk_widget_set_tooltip_text(close_button, "Close tab (middle-click or ✕)");
+  g_object_set_data(G_OBJECT(close_button), "viewmd-tab", tab);
+  g_signal_connect(close_button, "clicked", G_CALLBACK(on_tab_close_clicked),
+                   self);
+  gtk_box_pack_start(GTK_BOX(label_box), close_button, FALSE, FALSE, 0);
+
+  /* A plain GtkBox has no GdkWindow, so the notebook delivers tab button
+     events to itself and a middle-click on the label never reaches a
+     handler. An event box owns the tab's input window. */
+  tab->tab_label = gtk_event_box_new();
+  gtk_event_box_set_visible_window(GTK_EVENT_BOX(tab->tab_label), FALSE);
+  gtk_container_add(GTK_CONTAINER(tab->tab_label), label_box);
+  g_object_set_data(G_OBJECT(tab->tab_label), "viewmd-tab-label-child", label);
+
+  /* Middle-click anywhere on the tab label closes the tab. */
+  gtk_widget_add_events(tab->tab_label, GDK_BUTTON_PRESS_MASK);
+  g_object_set_data(G_OBJECT(tab->tab_label), "viewmd-tab", tab);
+  g_signal_connect(tab->tab_label, "button-press-event",
+                   G_CALLBACK(on_tab_label_button_press), self);
+
+  /* The text view registers its own drop target (text/plain), stealing file
+     drops in the document area from the window; let the window handle them.
+     gtk_drag_dest_unset warns unless the widget is currently a destination,
+     and a plain scrolled window never is, so only unset what was set. */
+  if (gtk_drag_dest_get_target_list(tab->editor->text_view) != NULL) {
+    gtk_drag_dest_unset(tab->editor->text_view);
+  }
+  if (gtk_drag_dest_get_target_list(tab->scroll) != NULL) {
+    gtk_drag_dest_unset(tab->scroll);
+  }
+
+  page = gtk_notebook_append_page(GTK_NOTEBOOK(self->notebook), tab->scroll,
+                                  tab->tab_label);
+  g_ptr_array_add(self->tabs, tab);
+  gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(self->notebook), tab->scroll,
+                                   TRUE);
+  gtk_notebook_set_current_page(GTK_NOTEBOOK(self->notebook), page);
+  self->active_index = page;
+  self->editor = tab->editor;
+  ensure_search_tags(self);
+  g_signal_connect(tab->editor->buffer, "changed",
+                   G_CALLBACK(on_editor_buffer_changed), self);
+  g_signal_connect(tab->editor->text_view, "scroll-event",
+                   G_CALLBACK(on_text_view_scroll), self);
+  gtk_widget_show_all(tab->scroll);
+  gtk_widget_show_all(tab->tab_label);
+
+  return tab;
+}
+
+static gboolean update_tab_label(MarkydWindow *self, MarkydTab *tab) {
+  GList *children;
+  gchar *base;
+  GtkWidget *label;
+
+  (void)self;
+  if (!tab || !tab->tab_label) {
+    return FALSE;
+  }
+
+  base = NULL;
+  if (tab->editor->file_path && tab->editor->file_path[0] != '\0') {
+    base = g_path_get_basename(tab->editor->file_path);
+  }
+  label = g_object_get_data(G_OBJECT(tab->tab_label), "viewmd-tab-label-child");
+  if (!label) {
+    GList *node;
+    children = gtk_container_get_children(GTK_CONTAINER(tab->tab_label));
+    for (node = children; node != NULL; node = node->next) {
+      if (GTK_IS_LABEL(node->data)) {
+        label = GTK_WIDGET(node->data);
+        break;
+      }
+    }
+    g_list_free(children);
+  }
+  if (label) {
+    gtk_label_set_text(GTK_LABEL(label), base ? base : "Untitled");
+  }
+  g_free(base);
+  return TRUE;
+}
+
+void markyd_window_close_tab(MarkydWindow *self, MarkydTab *tab) {
+  gint index;
+  gboolean was_active;
+
+  if (!self || !tab) {
+    return;
+  }
+
+  if (self->tabs->len <= 1) {
+    gtk_window_close(GTK_WINDOW(self->window));
+    return;
+  }
+
+  index = -1;
+  for (guint i = 0; i < self->tabs->len; i++) {
+    if (g_ptr_array_index(self->tabs, i) == tab) {
+      index = (gint)i;
+      break;
+    }
+  }
+  if (index < 0) {
+    return;
+  }
+  was_active = (index == self->active_index);
+
+  clear_search_matches(self);
+  gtk_notebook_remove_page(GTK_NOTEBOOK(self->notebook), (gint)index);
+  g_ptr_array_remove_index(self->tabs, (guint)index);
+  markyd_editor_free(tab->editor);
+  g_free(tab);
+
+  if (was_active) {
+    /* Drop the now-freed editor before switching: on_notebook_switch_page reads
+       self->editor->buffer in clear_search_matches and would dereference freed
+       memory otherwise. GTK usually selects the adjacent page itself, so read
+       the resulting page back instead of assuming set_current_page fired; a
+       stale active_index would silently break the next Ctrl+W. */
+    gint new_index;
+
+    self->editor = NULL;
+    self->active_index = -1;
+    new_index = CLAMP(index, 0, (gint)self->tabs->len - 1);
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(self->notebook), new_index);
+    new_index = gtk_notebook_get_current_page(GTK_NOTEBOOK(self->notebook));
+    if (new_index >= 0 && new_index < (gint)self->tabs->len) {
+      MarkydTab *now = g_ptr_array_index(self->tabs, (guint)new_index);
+      self->active_index = new_index;
+      self->editor = now->editor;
+    }
+  } else {
+    /* Removing a page before the active one shifts its index without a
+       switch-page signal. */
+    gint new_index = gtk_notebook_get_current_page(GTK_NOTEBOOK(self->notebook));
+    if (new_index >= 0 && new_index < (gint)self->tabs->len) {
+      MarkydTab *now = g_ptr_array_index(self->tabs, (guint)new_index);
+      self->active_index = new_index;
+      self->editor = now->editor;
+    }
+  }
+}
+
+MarkydTab *markyd_window_get_active_tab(MarkydWindow *self) {
+  if (!self || self->active_index < 0 ||
+      self->active_index >= (gint)self->tabs->len) {
+    return NULL;
+  }
+  return g_ptr_array_index(self->tabs, (guint)self->active_index);
+}
+
+void markyd_window_switch_tab(MarkydWindow *self, gint offset) {
+  gint page;
+  gint count;
+
+  if (!self || !self->notebook || self->tabs->len == 0) {
+    return;
+  }
+  count = gtk_notebook_get_n_pages(GTK_NOTEBOOK(self->notebook));
+  if (count == 0) {
+    return;
+  }
+  page = gtk_notebook_get_current_page(GTK_NOTEBOOK(self->notebook)) + offset;
+  page = ((page % count) + count) % count;
+  gtk_notebook_set_current_page(GTK_NOTEBOOK(self->notebook), page);
+}
+
+gboolean markyd_window_has_document(MarkydWindow *self, MarkydTab *tab) {
+  (void)self;
+  return tab && tab->editor->file_path && tab->editor->file_path[0] != '\0';
+}
+
+static gboolean load_document_into_tab(MarkydWindow *self, MarkydTab *tab,
+                                       const gchar *path) {
+  gchar *content = NULL;
+  GError *error = NULL;
+
+  if (!g_file_get_contents(path, &content, NULL, &error)) {
+    if (error) {
+      g_printerr("Failed to load markdown file '%s': %s\n", path,
+                 error->message);
+      g_error_free(error);
+    }
+    return FALSE;
+  }
+
+  markyd_editor_set_file_path(tab->editor, path);
+  markyd_editor_set_content(tab->editor, content);
+  g_free(content);
+  update_tab_label(self, tab);
+  markyd_app_update_window_title(self->app);
+  return TRUE;
+}
+
+gboolean markyd_window_open_document(MarkydWindow *self, const gchar *path) {
+  MarkydTab *tab;
+
+  if (!self || !path || path[0] == '\0') {
+    return FALSE;
+  }
+
+  tab = markyd_window_get_active_tab(self);
+  if (tab && !markyd_window_has_document(self, tab)) {
+    return load_document_into_tab(self, tab, path);
+  }
+
+  tab = markyd_window_new_tab(self);
+  if (!load_document_into_tab(self, tab, path)) {
+    markyd_window_close_tab(self, tab);
+    return FALSE;
+  }
+  return TRUE;
 }
 
 void markyd_window_apply_css(MarkydWindow *self) {
@@ -942,8 +1288,16 @@ void markyd_window_free(MarkydWindow *self) {
     self->search_matches = NULL;
   }
 
-  if (self->editor) {
-    markyd_editor_free(self->editor);
+  if (self->tabs) {
+    for (guint i = 0; i < self->tabs->len; i++) {
+      MarkydTab *tab = g_ptr_array_index(self->tabs, i);
+      if (tab) {
+        markyd_editor_free(tab->editor);
+        g_free(tab);
+      }
+    }
+    g_ptr_array_free(self->tabs, TRUE);
+    self->tabs = NULL;
   }
 
   if (self->window) {
@@ -1004,7 +1358,7 @@ static void on_open_clicked(GtkButton *button, gpointer user_data) {
   if (response == GTK_RESPONSE_ACCEPT) {
     gchar *path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
     if (path) {
-      if (!markyd_app_open_file(self->app, path)) {
+      if (!markyd_window_open_document(self, path)) {
         GtkWidget *error_dialog = gtk_message_dialog_new(
             GTK_WINDOW(self->window),
             GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR,
@@ -1023,28 +1377,27 @@ static void on_open_clicked(GtkButton *button, gpointer user_data) {
 
 static void on_refresh_clicked(GtkButton *button, gpointer user_data) {
   MarkydWindow *self = (MarkydWindow *)user_data;
+  MarkydTab *tab;
   const gchar *current;
-  gchar *path;
 
   (void)button;
 
-  current = markyd_app_get_current_path(self->app);
+  tab = markyd_window_get_active_tab(self);
+  current = tab ? markyd_editor_get_file_path(tab->editor) : NULL;
   if (!current || current[0] == '\0') {
     return;
   }
 
-  path = g_strdup(current);
-  if (!markyd_app_open_file(self->app, path)) {
+  if (!load_document_into_tab(self, tab, current)) {
     GtkWidget *error_dialog = gtk_message_dialog_new(
         GTK_WINDOW(self->window),
         GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR,
         GTK_BUTTONS_CLOSE, "Failed to reload document");
     gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(error_dialog),
-                                             "%s", path);
+                                             "%s", current);
     gtk_dialog_run(GTK_DIALOG(error_dialog));
     gtk_widget_destroy(error_dialog);
   }
-  g_free(path);
 }
 
 static void on_settings_clicked(GtkButton *button, gpointer user_data) {
@@ -1140,10 +1493,26 @@ static void on_drag_data_received(GtkWidget *widget, GdkDragContext *context,
   }
   for (uri = uris; *uri != NULL; uri++) {
     gchar *path = g_filename_from_uri(*uri, NULL, NULL);
+    gboolean opened = FALSE;
+
     if (!path) {
       continue;
     }
-    markyd_app_open_file(self->app, path);
+    for (guint i = 0; self->tabs && i < self->tabs->len; i++) {
+      MarkydTab *tab = g_ptr_array_index(self->tabs, i);
+      if (tab && tab->editor &&
+          g_strcmp0(tab->editor->file_path, path) == 0) {
+        load_document_into_tab(self, tab, path);
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(self->notebook), (gint)i);
+        self->active_index = (gint)i;
+        self->editor = tab->editor;
+        opened = TRUE;
+        break;
+      }
+    }
+    if (!opened) {
+      markyd_window_open_document(self, path);
+    }
     g_free(path);
   }
   g_strfreev(uris);
@@ -1159,8 +1528,34 @@ static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event,
   }
 
   if ((event->state & GDK_CONTROL_MASK) != 0 &&
+      (event->keyval == GDK_KEY_Tab ||
+       event->keyval == GDK_KEY_ISO_Left_Tab)) {
+    gboolean shift = (event->state & GDK_SHIFT_MASK) != 0 ||
+                     event->keyval == GDK_KEY_ISO_Left_Tab;
+    markyd_window_switch_tab(self, shift ? -1 : 1);
+    return TRUE;
+  }
+
+  if ((event->state & GDK_CONTROL_MASK) != 0 &&
+      (event->keyval == GDK_KEY_Page_Up ||
+       event->keyval == GDK_KEY_KP_Page_Up)) {
+    markyd_window_switch_tab(self, -1);
+    return TRUE;
+  }
+
+  if ((event->state & GDK_CONTROL_MASK) != 0 &&
+      (event->keyval == GDK_KEY_Page_Down ||
+       event->keyval == GDK_KEY_KP_Page_Down)) {
+    markyd_window_switch_tab(self, 1);
+    return TRUE;
+  }
+
+  if ((event->state & GDK_CONTROL_MASK) != 0 &&
       (event->keyval == GDK_KEY_w || event->keyval == GDK_KEY_W)) {
-    gtk_window_close(GTK_WINDOW(widget));
+    MarkydTab *tab = markyd_window_get_active_tab(self);
+    if (tab) {
+      markyd_window_close_tab(self, tab);
+    }
     return TRUE;
   }
 
@@ -1200,6 +1595,8 @@ static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event,
   }
 
   if (event->keyval == GDK_KEY_Home || event->keyval == GDK_KEY_KP_Home) {
+    GtkWidget *scroll;
+
     if (self->editor && self->editor->buffer && self->editor->text_view) {
       GtkTextIter start;
       GtkAdjustment *hadj = NULL;
@@ -1210,9 +1607,12 @@ static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event,
       gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(self->editor->text_view), &start,
                                    0.0, FALSE, 0.0, 0.0);
 
-      if (self->scroll) {
-        hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(self->scroll));
-        vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(self->scroll));
+      scroll = markyd_window_get_active_tab(self)
+                   ? markyd_window_get_active_tab(self)->scroll
+                   : NULL;
+      if (scroll) {
+        hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(scroll));
+        vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(scroll));
       }
       if (hadj) {
         gtk_adjustment_set_value(hadj, gtk_adjustment_get_lower(hadj));

@@ -167,7 +167,7 @@ static gboolean resolve_image_source_path(MarkydEditor *self, const gchar *src,
   } else if (g_path_is_absolute(src)) {
     path = g_strdup(src);
   } else {
-    const gchar *current_path = markyd_app_get_current_path(self->app);
+    const gchar *current_path = self->file_path;
     if (current_path && current_path[0] != '\0') {
       gchar *dir = g_path_get_dirname(current_path);
       path = g_build_filename(dir, src, NULL);
@@ -380,6 +380,7 @@ MarkydEditor *markyd_editor_new(MarkydApp *app) {
 
   self->app = app;
   self->source_content = g_strdup("");
+  self->file_path = NULL;
   self->updating_tags = FALSE;
   self->markdown_idle_id = 0;
 
@@ -397,6 +398,11 @@ MarkydEditor *markyd_editor_new(MarkydApp *app) {
 
   self->buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(self->text_view));
   markdown_init_tags(self->buffer);
+  /* Search tags live on every tab's buffer so Ctrl+F works on any tab. */
+  gtk_text_buffer_create_tag(self->buffer, TAG_SEARCH_MATCH, "weight",
+                             PANGO_WEIGHT_BOLD, NULL);
+  gtk_text_buffer_create_tag(self->buffer, TAG_SEARCH_CURRENT, "weight",
+                             PANGO_WEIGHT_BOLD, NULL);
 
   gtk_widget_add_events(self->text_view, GDK_POINTER_MOTION_MASK |
                                             GDK_LEAVE_NOTIFY_MASK |
@@ -455,6 +461,7 @@ void markyd_editor_free(MarkydEditor *self) {
     self->markdown_idle_id = 0;
   }
   g_free(self->source_content);
+  g_free(self->file_path);
   g_free(self);
 }
 
@@ -478,6 +485,21 @@ gchar *markyd_editor_get_content(MarkydEditor *self) {
     return g_strdup("");
   }
   return g_strdup(self->source_content ? self->source_content : "");
+}
+
+void markyd_editor_set_file_path(MarkydEditor *self, const gchar *path) {
+  if (!self) {
+    return;
+  }
+  g_free(self->file_path);
+  self->file_path = g_strdup(path);
+}
+
+const gchar *markyd_editor_get_file_path(MarkydEditor *self) {
+  if (!self) {
+    return NULL;
+  }
+  return self->file_path;
 }
 
 GtkWidget *markyd_editor_get_widget(MarkydEditor *self) {
