@@ -44,6 +44,7 @@ typedef struct {
 typedef struct {
   MD_BLOCKTYPE type;
   guint pushed_tags;
+  gboolean skipped; /* block inside a collapsed section, emitted nothing */
 } BlockState;
 
 typedef struct {
@@ -87,6 +88,18 @@ typedef struct {
   gboolean in_code_block;
   GString *code_source;
   gchar *code_language; /* fenced code block language, or "" */
+  /* Collapse state */
+  GHashTable *collapsed; /* heading/details key -> TRUE; borrowed */
+  gint heading_level;
+  gboolean in_details_summary;
+  GtkTextChildAnchor *current_fold_anchor;
+  gchar *pending_details_id; /* details fold key, or NULL */
+  gboolean pending_details_open;
+  gboolean pending_details_closed; /* currently inside collapsed details */
+  gint details_seq;
+  gint skip_until_level; /* skip until heading of this level or shallower */
+  gboolean details_skip; /* skip until the matching end-details marker */
+  gint details_skip_depth; /* nesting depth of the skipped details block */
   gboolean has_output;
   guint trailing_newlines;
 } RenderCtx;
@@ -456,6 +469,151 @@ static void frontmatter_pairs_free(gpointer data) {
     return;
   }
   g_ptr_array_free(pairs, TRUE);
+}
+
+static gboolean fold_is_collapsed(RenderCtx *ctx, const gchar *key,
+                                  gboolean default_collapsed) {
+  if (!ctx || !ctx->collapsed || !key || key[0] == '\0') {
+    return default_collapsed;
+  }
+  /* Distinguish 'absent' from an explicit FALSE, which is stored as a NULL
+     value. */
+  if (g_hash_table_contains(ctx->collapsed, key)) {
+    return GPOINTER_TO_INT(g_hash_table_lookup(ctx->collapsed, key)) != 0;
+  }
+  return default_collapsed;
+}
+
+/* Pre-pass: rewrite <details>/<summary>/</details> blocks into marker HTML
+   comments plus a synthetic H6 summary line, so the renderer can recognize
+   them via md4c events. The pass is fence-aware so fenced code blocks are
+   left untouched. */
+static gchar *transform_details(const gchar *source) {
+  GPtrArray *lines;
+  GString *out;
+  guint i;
+  guint n;
+
+  if (!source) {
+    return g_strdup("");
+  }
+
+  lines = g_ptr_array_new_with_free_func(g_free);
+  {
+    const gchar *p = source;
+    while (p && *p) {
+      const gchar *nl = strchr(p, '\n');
+      gsize len = nl ? (gsize)(nl - p) : strlen(p);
+      g_ptr_array_add(lines, g_strndup(p, len));
+      if (!nl) {
+        break;
+      }
+      p = nl + 1;
+    }
+  }
+
+  out = g_string_new(NULL);
+  n = lines->len;
+  gboolean in_fence = FALSE;
+  gchar fence_char = 0;
+  guint fence_len = 0;
+  for (i = 0; i < n; i++) {
+    const gchar *line = g_ptr_array_index(lines, i);
+    const gchar *p = line;
+    const gchar *trimmed_start;
+    gchar *trimmed;
+    gboolean fence_line = FALSE;
+    gboolean fence_close = FALSE;
+    gchar line_fence_char = 0;
+    guint line_fence_len = 0;
+
+    while (*p == ' ' || *p == '\t') {
+      p++;
+    }
+    trimmed_start = p;
+
+    if ((trimmed_start[0] == '`' && strncmp(trimmed_start, "```", 3) == 0) ||
+        (trimmed_start[0] == '~' && strncmp(trimmed_start, "~~~", 3) == 0)) {
+      gint run = 0;
+      while (trimmed_start[run] == trimmed_start[0]) {
+        run++;
+      }
+      if (run >= 3) {
+        const gchar *rest = trimmed_start + run;
+        while (*rest == ' ' || *rest == '\t') {
+          rest++;
+        }
+        fence_line = TRUE;
+        fence_close = (*rest == '\0');
+        line_fence_char = trimmed_start[0];
+        line_fence_len = (guint)run;
+      }
+    }
+
+    if (in_fence) {
+      if (fence_close && line_fence_char == fence_char &&
+          line_fence_len >= fence_len) {
+        in_fence = FALSE;
+      }
+      g_string_append(out, line);
+      g_string_append_c(out, '\n');
+      continue;
+    }
+    if (fence_line) {
+      in_fence = TRUE;
+      fence_char = line_fence_char;
+      fence_len = line_fence_len;
+      g_string_append(out, line);
+      g_string_append_c(out, '\n');
+      continue;
+    }
+
+    trimmed = g_strdup(line);
+    g_strstrip(trimmed);
+
+    if (g_str_has_prefix(trimmed, "<details") &&
+        (trimmed[8] == '>' || trimmed[8] == ' ' || trimmed[8] == '\t' ||
+         trimmed[8] == '\0') &&
+        g_strstr_len(trimmed, -1, "</details>") == NULL) {
+      gboolean open =
+          g_strstr_len(trimmed, -1, " open") != NULL ||
+          g_strstr_len(trimmed, -1, "open>") != NULL;
+      guint id = i; /* unique-enough within the document */
+      g_string_append_printf(out, "<!--vmd-details %u %d-->\n", id,
+                             open ? 1 : 0);
+      /* Inject a default summary heading when no <summary> follows. */
+      if (i + 1 >= n || !g_str_has_prefix(g_ptr_array_index(lines, i + 1),
+                                          "<summary")) {
+        g_string_append_printf(out, "###### Details\n");
+      }
+    } else if (g_str_has_prefix(trimmed, "</details>")) {
+      g_string_append_printf(out, "<!--vmd-details-end %u-->\n", i);
+    } else if (g_str_has_prefix(trimmed, "<summary") &&
+               (trimmed[8] == '>' || trimmed[8] == ' ' ||
+                trimmed[8] == '\t')) {
+      const gchar *gt = strchr(trimmed, '>');
+      const gchar *close;
+      gchar *inner = NULL;
+      if (gt) {
+        close = strstr(gt + 1, "</summary>");
+        if (close) {
+          inner = g_strndup(gt + 1, (gsize)(close - (gt + 1)));
+        }
+      }
+      g_string_append(out, "###### ");
+      g_string_append(out, inner ? inner : "Details");
+      g_string_append_c(out, '\n');
+      g_free(inner);
+    } else {
+      g_string_append(out, line);
+      g_string_append_c(out, '\n');
+    }
+
+    g_free(trimmed);
+  }
+
+  g_ptr_array_free(lines, TRUE);
+  return g_string_free(out, FALSE);
 }
 
 /* Returns a GPtrArray of "key\tvalue" strings for a leading YAML frontmatter
@@ -863,26 +1021,43 @@ static void capture_heading_text(RenderCtx *ctx, const gchar *text) {
   }
 }
 
-static void create_heading_anchor(RenderCtx *ctx) {
+static gchar *heading_anchor_key(RenderCtx *ctx) {
   gchar *base;
   guint count;
   gchar *slug;
-  gchar *mark_name;
-  GtkTextIter at;
 
-  if (!ctx || !ctx->heading_text) {
-    return;
+  if (!ctx || !ctx->heading_text || ctx->heading_text->len == 0) {
+    return NULL;
   }
 
   base = markdown_normalize_anchor_slug(ctx->heading_text->str);
   if (!base || base[0] == '\0') {
     g_free(base);
-    return;
+    return NULL;
   }
 
   count = GPOINTER_TO_UINT(g_hash_table_lookup(ctx->anchor_counts, base));
   slug = (count == 0) ? g_strdup(base) : g_strdup_printf("%s-%u", base, count);
-  g_hash_table_replace(ctx->anchor_counts, g_strdup(base), GUINT_TO_POINTER(count + 1));
+  g_hash_table_replace(ctx->anchor_counts, g_strdup(base),
+                       GUINT_TO_POINTER(count + 1));
+
+  g_free(base);
+  return slug;
+}
+
+static gchar *create_heading_anchor(RenderCtx *ctx) {
+  gchar *slug;
+  gchar *mark_name;
+  GtkTextIter at;
+
+  if (!ctx || !ctx->heading_text || ctx->heading_text->len == 0) {
+    return NULL;
+  }
+
+  slug = heading_anchor_key(ctx);
+  if (!slug) {
+    return NULL;
+  }
 
   mark_name = g_strdup_printf("%s%s", VIEWMD_ANCHOR_MARK_PREFIX, slug);
   gtk_text_buffer_get_iter_at_offset(ctx->buffer, &at, ctx->heading_start_offset);
@@ -892,8 +1067,7 @@ static void create_heading_anchor(RenderCtx *ctx) {
   }
 
   g_free(mark_name);
-  g_free(slug);
-  g_free(base);
+  return slug;
 }
 
 static void table_capture_append(RenderCtx *ctx, const gchar *text) {
@@ -1198,7 +1372,38 @@ static void insert_list_marker(RenderCtx *ctx, const MD_BLOCK_LI_DETAIL *detail)
 
 static int on_enter_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
   RenderCtx *ctx = (RenderCtx *)userdata;
-  BlockState state = {type, 0};
+  BlockState state = {type, 0, FALSE};
+
+  /* Skip content inside collapsed sections; only headings shallower than the
+     collapsed one or HTML blocks (for details end markers) get through. */
+  if (ctx->skip_until_level > 0 || ctx->details_skip) {
+    gboolean resume_heading = FALSE;
+    if (ctx->details_skip) {
+      if (type == MD_BLOCK_HTML) {
+        /* let markers through; on_text decides what to render */
+      } else {
+        state.skipped = TRUE;
+        g_array_append_val(ctx->block_stack, state);
+        return 0;
+      }
+    } else if (type == MD_BLOCK_H) {
+      MD_BLOCK_H_DETAIL *h = (MD_BLOCK_H_DETAIL *)detail;
+      gint level = h ? h->level : 1;
+      if (level <= ctx->skip_until_level) {
+        ctx->skip_until_level = 0;
+        resume_heading = TRUE;
+      } else {
+        state.skipped = TRUE;
+        g_array_append_val(ctx->block_stack, state);
+        return 0;
+      }
+    } else {
+      state.skipped = TRUE;
+      g_array_append_val(ctx->block_stack, state);
+      return 0;
+    }
+    (void)resume_heading;
+  }
 
   g_array_append_val(ctx->block_stack, state);
 
@@ -1216,8 +1421,11 @@ static int on_enter_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
 
   case MD_BLOCK_H: {
     MD_BLOCK_H_DETAIL *h = (MD_BLOCK_H_DETAIL *)detail;
+    gboolean is_details = (ctx->pending_details_id != NULL);
+
     ensure_newlines(ctx, 2);
     ctx->heading_start_offset = gtk_text_iter_get_offset(&ctx->iter);
+    ctx->heading_level = h ? h->level : 1;
     ctx->in_heading = TRUE;
     if (!ctx->heading_text) {
       ctx->heading_text = g_string_new(NULL);
@@ -1240,6 +1448,21 @@ static int on_enter_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
                               &g_array_index(ctx->block_stack, BlockState,
                                              ctx->block_stack->len - 1)
                                    .pushed_tags);
+    }
+
+    /* Fold toggle anchor sits just before the heading text. */
+    ctx->current_fold_anchor =
+        gtk_text_buffer_create_child_anchor(ctx->buffer, &ctx->iter);
+    g_object_set_data(G_OBJECT(ctx->current_fold_anchor),
+                      VIEWMD_FOLD_ANCHOR_DATA, GINT_TO_POINTER(1));
+    g_object_set_data(G_OBJECT(ctx->current_fold_anchor),
+                      VIEWMD_FOLD_IS_DETAILS_DATA,
+                      GINT_TO_POINTER(is_details ? 1 : 0));
+    if (is_details) {
+      g_object_set_data_full(G_OBJECT(ctx->current_fold_anchor),
+                             VIEWMD_FOLD_KEY_DATA,
+                             g_strdup(ctx->pending_details_id), g_free);
+      ctx->in_details_summary = TRUE;
     }
     break;
   }
@@ -1353,9 +1576,59 @@ static int on_leave_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
   RenderCtx *ctx = (RenderCtx *)userdata;
   (void)detail;
 
+  /* Popped a skipped (collapsed) block: nothing was emitted. */
+  if (ctx->block_stack->len > 0) {
+    BlockState top =
+        g_array_index(ctx->block_stack, BlockState, ctx->block_stack->len - 1);
+    if (top.skipped) {
+      g_array_set_size(ctx->block_stack, ctx->block_stack->len - 1);
+      return 0;
+    }
+  }
+
   if (type == MD_BLOCK_H) {
-    create_heading_anchor(ctx);
+    gchar *heading_slug = create_heading_anchor(ctx);
     ctx->in_heading = FALSE;
+
+    if (ctx->current_fold_anchor) {
+      const gchar *anchor_is_details = g_object_get_data(
+          G_OBJECT(ctx->current_fold_anchor), VIEWMD_FOLD_IS_DETAILS_DATA);
+      gboolean is_details = anchor_is_details != NULL;
+      gchar *key;
+      gboolean collapsed;
+
+      if (is_details) {
+        key = g_strdup(ctx->pending_details_id ? ctx->pending_details_id : "");
+        collapsed = fold_is_collapsed(ctx, key, !ctx->pending_details_open);
+        ctx->in_details_summary = FALSE;
+      } else {
+        key = heading_slug ? g_strdup(heading_slug) : NULL;
+        if (!key || key[0] == '\0') {
+          g_free(key);
+          key = g_strdup_printf("h-%u", ctx->details_seq++);
+        }
+        collapsed = fold_is_collapsed(ctx, key, FALSE);
+      }
+
+      g_object_set_data_full(G_OBJECT(ctx->current_fold_anchor),
+                             VIEWMD_FOLD_KEY_DATA, g_strdup(key), g_free);
+      g_object_set_data(G_OBJECT(ctx->current_fold_anchor),
+                        VIEWMD_FOLD_STATE_DATA,
+                        GINT_TO_POINTER(collapsed ? 1 : 0));
+
+      if (collapsed) {
+        if (is_details) {
+          ctx->details_skip = TRUE;
+          ctx->details_skip_depth = 1;
+        } else {
+          ctx->skip_until_level = ctx->heading_level;
+        }
+      }
+      g_free(key);
+    }
+    g_clear_pointer(&ctx->pending_details_id, g_free);
+    g_free(heading_slug);
+    ctx->current_fold_anchor = NULL;
     ensure_newlines(ctx, 1);
   } else if (type == MD_BLOCK_QUOTE) {
     if (ctx->quote_depth > 0) {
@@ -1483,7 +1756,9 @@ static int on_leave_span(MD_SPANTYPE type, void *detail, void *userdata) {
     SpanState state =
         g_array_index(ctx->span_stack, SpanState, ctx->span_stack->len - 1);
     if (state.type == MD_SPAN_IMG && ctx->in_image) {
-      image_emit_anchor(ctx);
+      if (ctx->skip_until_level == 0 && !ctx->details_skip) {
+        image_emit_anchor(ctx);
+      }
       ctx->in_image = FALSE;
       g_free(ctx->image_src);
       ctx->image_src = NULL;
@@ -1522,6 +1797,42 @@ static int on_text(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size,
   if (ctx->list_item_prefix_pending && rendered[0] != '\0') {
     ctx->list_item_prefix_pending = FALSE;
   }
+
+  /* Details markers are only meaningful while no heading section is collapsed:
+     inside a collapsed section they would otherwise leave a stale
+     pending_details_id that the next visible heading would mistake for a
+     summary, swallowing the rest of the document. */
+  if (type == MD_TEXT_HTML && ctx->skip_until_level == 0) {
+    gint seq = -1;
+    gint open = -1;
+    if (sscanf(rendered, "<!--vmd-details %d %d-->", &seq, &open) == 2) {
+      if (ctx->details_skip_depth > 0) {
+        ctx->details_skip_depth++;
+      } else {
+        g_free(ctx->pending_details_id);
+        ctx->pending_details_id = g_strdup_printf("details-%d", seq);
+        ctx->pending_details_open = (open != 0);
+      }
+      g_free(rendered);
+      return 0;
+    }
+    if (sscanf(rendered, "<!--vmd-details-end %d-->", &seq) == 1) {
+      if (ctx->details_skip_depth > 0) {
+        ctx->details_skip_depth--;
+        if (ctx->details_skip_depth == 0) {
+          ctx->details_skip = FALSE;
+        }
+      }
+      g_free(rendered);
+      return 0;
+    }
+  }
+
+  if (ctx->skip_until_level > 0 || ctx->details_skip) {
+    g_free(rendered);
+    return 0;
+  }
+
   if (ctx->in_code_block) {
     g_string_append(ctx->code_source, rendered);
   } else if (ctx->in_image) {
@@ -1906,7 +2217,41 @@ GtkWidget *markdown_create_frontmatter_widget(GtkTextChildAnchor *anchor) {
   return wrapper;
 }
 
-void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
+GtkWidget *markdown_create_fold_widget(GtkTextChildAnchor *anchor) {
+  GtkWidget *button;
+  GtkWidget *icon;
+  gboolean collapsed;
+
+  if (!anchor) {
+    return NULL;
+  }
+  collapsed =
+      g_object_get_data(G_OBJECT(anchor), VIEWMD_FOLD_STATE_DATA) != NULL;
+
+  /* Use theme disclosure icons (pan-down/pan-end) rather than unicode glyphs,
+     which render as missing-glyph boxes on fonts without those code points. */
+  button = gtk_button_new();
+  gtk_widget_set_focus_on_click(button, FALSE);
+  gtk_widget_set_can_focus(button, FALSE);
+  gtk_button_set_relief(GTK_BUTTON(button), GTK_RELIEF_NONE);
+  gtk_widget_set_halign(button, GTK_ALIGN_START);
+  gtk_style_context_add_class(gtk_widget_get_style_context(button),
+                              "viewmd-fold-toggle");
+  icon = gtk_image_new_from_icon_name(
+      collapsed ? "pan-end-symbolic" : "pan-down-symbolic",
+      GTK_ICON_SIZE_MENU);
+  gtk_container_add(GTK_CONTAINER(button), icon);
+  gtk_widget_set_tooltip_text(button,
+                              collapsed ? "Expand section" : "Collapse section");
+  /* Effective collapsed state at render time; click handlers flip this and
+     write the explicit override into the editor's collapse map. */
+  g_object_set_data(G_OBJECT(button), "viewmd-fold-collapsed",
+                    GINT_TO_POINTER(collapsed ? 1 : 0));
+  return button;
+}
+
+void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source,
+                         GHashTable *collapsed) {
   RenderCtx ctx;
   MD_PARSER parser = {0};
   gchar *normalized_source;
@@ -1928,7 +2273,9 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
   ctx.span_stack = g_array_new(FALSE, FALSE, sizeof(SpanState));
   ctx.list_stack = g_array_new(FALSE, FALSE, sizeof(ListState));
   ctx.anchor_counts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+  ctx.collapsed = collapsed;
   ctx.heading_start_offset = 0;
+  ctx.heading_level = 1;
   ctx.has_output = FALSE;
   ctx.trailing_newlines = 0;
 
@@ -1937,7 +2284,7 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
     const gchar *body = NULL;
 
     frontmatter = parse_frontmatter(input, &body);
-    normalized_source = g_strdup(body);
+    normalized_source = transform_details(body);
 
     gtk_text_buffer_get_start_iter(buffer, &ctx.iter);
     if (frontmatter) {
@@ -1966,6 +2313,7 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
     g_string_free(ctx.code_source, TRUE);
   }
   g_free(ctx.code_language);
+  g_free(ctx.pending_details_id);
   if (ctx.table_cell_text) {
     g_string_free(ctx.table_cell_text, TRUE);
   }

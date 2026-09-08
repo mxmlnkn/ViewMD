@@ -15,7 +15,9 @@ static void schedule_markdown_apply(MarkydEditor *self);
 static void render_image_widgets(MarkydEditor *self);
 static void render_table_widgets(MarkydEditor *self);
 static void render_frontmatter_widgets(MarkydEditor *self);
-static void render_code_block_widgets(MarkydEditor *self);static void refresh_image_widget_scales(MarkydEditor *self);
+static void render_code_block_widgets(MarkydEditor *self);
+static void render_fold_widgets(MarkydEditor *self);
+static void refresh_image_widget_scales(MarkydEditor *self);
 static gboolean resolve_image_source_path(MarkydEditor *self, const gchar *src,
                                           gchar **out_path);
 static void on_text_view_size_allocate(GtkWidget *widget, GtkAllocation *allocation,
@@ -141,11 +143,13 @@ static void apply_markdown(MarkydEditor *self) {
 
   self->updating_tags = TRUE;
   markdown_apply_tags(self->buffer,
-                      self->source_content ? self->source_content : "");
+                      self->source_content ? self->source_content : "",
+                      self->collapsed);
   render_image_widgets(self);
   render_table_widgets(self);
   render_frontmatter_widgets(self);
   render_code_block_widgets(self);
+  render_fold_widgets(self);
   refresh_image_widget_scales(self);
   self->updating_tags = FALSE;
 }
@@ -419,6 +423,67 @@ static void render_code_block_widgets(MarkydEditor *self) {
   }
 }
 
+static void on_fold_toggle_clicked(GtkButton *button, gpointer user_data) {
+  MarkydEditor *self = (MarkydEditor *)user_data;
+  const gchar *key;
+  gboolean effective_collapsed;
+
+  if (!self) {
+    return;
+  }
+  key = g_object_get_data(G_OBJECT(button), "viewmd-fold-key");
+  if (!key || key[0] == '\0') {
+    return;
+  }
+
+  /* The button stores the collapsed state as rendered (which for <details>
+     includes the default). Flip the effective state and record the explicit
+     override so fold_is_collapsed() sees it on the next re-render. */
+  effective_collapsed =
+      g_object_get_data(G_OBJECT(button), "viewmd-fold-collapsed") != NULL;
+  g_hash_table_replace(self->collapsed, g_strdup(key),
+                       GINT_TO_POINTER(!effective_collapsed));
+  markyd_editor_refresh(self);
+}
+
+static void render_fold_widgets(MarkydEditor *self) {
+  GtkTextIter iter;
+  GtkTextIter end;
+
+  if (!self || !self->buffer || !self->text_view) {
+    return;
+  }
+
+  gtk_text_buffer_get_bounds(self->buffer, &iter, &end);
+  while (!gtk_text_iter_equal(&iter, &end)) {
+    GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(&iter);
+    if (anchor &&
+        g_object_get_data(G_OBJECT(anchor), VIEWMD_FOLD_ANCHOR_DATA) != NULL) {
+      GtkWidget *button =
+          g_object_get_data(G_OBJECT(anchor), VIEWMD_FOLD_WIDGET_DATA);
+      if (!button) {
+        button = markdown_create_fold_widget(anchor);
+        if (button) {
+          gtk_text_view_add_child_at_anchor(GTK_TEXT_VIEW(self->text_view),
+                                            button, anchor);
+          gtk_widget_show_all(button);
+          g_object_set_data(G_OBJECT(anchor), VIEWMD_FOLD_WIDGET_DATA, button);
+        }
+      }
+      /* Keep the fold key on the button for the click handler / no lock. */
+      if (button) {
+        const gchar *key =
+            g_object_get_data(G_OBJECT(anchor), VIEWMD_FOLD_KEY_DATA);
+        g_object_set_data_full(G_OBJECT(button), "viewmd-fold-key",
+                               g_strdup(key ? key : ""), g_free);
+        g_signal_connect(button, "clicked", G_CALLBACK(on_fold_toggle_clicked),
+                         self);
+      }
+    }
+    gtk_text_iter_forward_char(&iter);
+  }
+}
+
 static gboolean apply_markdown_idle(gpointer user_data) {
   MarkydEditor *self = (MarkydEditor *)user_data;
   self->markdown_idle_id = 0;
@@ -443,6 +508,8 @@ MarkydEditor *markyd_editor_new(MarkydApp *app) {
   self->app = app;
   self->source_content = g_strdup("");
   self->file_path = NULL;
+  self->collapsed = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                          NULL);
   self->updating_tags = FALSE;
   self->markdown_idle_id = 0;
 
@@ -524,6 +591,10 @@ void markyd_editor_free(MarkydEditor *self) {
   }
   g_free(self->source_content);
   g_free(self->file_path);
+  if (self->collapsed) {
+    g_hash_table_destroy(self->collapsed);
+    self->collapsed = NULL;
+  }
   g_free(self);
 }
 
@@ -553,8 +624,17 @@ void markyd_editor_set_file_path(MarkydEditor *self, const gchar *path) {
   if (!self) {
     return;
   }
+
+  /* Filenames may be non-UTF-8 on non-UTF-8 locales; the path also feeds the
+     tab title and window title, so sanitize it. */
+  gchar *sanitized = g_utf8_make_valid(path ? path : "", -1);
+
+  /* Opening a different document resets remembered collapse state. */
+  if (g_strcmp0(self->file_path, sanitized) != 0 && self->collapsed) {
+    g_hash_table_remove_all(self->collapsed);
+  }
   g_free(self->file_path);
-  self->file_path = g_strdup(path);
+  self->file_path = sanitized;
 }
 
 const gchar *markyd_editor_get_file_path(MarkydEditor *self) {
@@ -583,6 +663,33 @@ void markyd_editor_focus(MarkydEditor *self) {
   }
 }
 
+/* The fold toggle widget only covers the disclosure triangle, but a heading
+   or details summary line starts with the fold child anchor, so a click
+   anywhere on its text can be mapped back to that toggle. */
+static GtkWidget *fold_button_at_iter(GtkTextBuffer *buffer,
+                                      const GtkTextIter *at) {
+  GtkTextIter iter;
+  GtkTextIter line_end;
+
+  if (!buffer || !at) {
+    return NULL;
+  }
+  gtk_text_buffer_get_iter_at_line(buffer, &iter, gtk_text_iter_get_line(at));
+  line_end = iter;
+  gtk_text_iter_forward_to_line_end(&line_end);
+  while (!gtk_text_iter_equal(&iter, &line_end)) {
+    GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(&iter);
+    if (anchor && g_object_get_data(G_OBJECT(anchor), VIEWMD_FOLD_ANCHOR_DATA)) {
+      return (GtkWidget *)g_object_get_data(G_OBJECT(anchor),
+                                            VIEWMD_FOLD_WIDGET_DATA);
+    }
+    if (!gtk_text_iter_forward_char(&iter)) {
+      break;
+    }
+  }
+  return NULL;
+}
+
 static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event,
                                   gpointer user_data) {
   MarkydEditor *self = (MarkydEditor *)user_data;
@@ -601,6 +708,20 @@ static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event,
   gtk_text_view_get_iter_at_location(GTK_TEXT_VIEW(widget), &iter, bx, by);
 
   if (!get_link_url_at_iter(self->buffer, &iter, &url)) {
+    GtkWidget *fold_button = fold_button_at_iter(self->buffer, &iter);
+    if (fold_button) {
+      GtkTextIter sel_start;
+      GtkTextIter sel_end;
+
+      /* A release that ends a drag within the heading/summary line is a text
+         selection, not a toggle click; keep the selection intact. */
+      if (gtk_text_buffer_get_selection_bounds(self->buffer, &sel_start,
+                                               &sel_end)) {
+        return FALSE;
+      }
+      gtk_button_clicked(GTK_BUTTON(fold_button));
+      return TRUE;
+    }
     return FALSE;
   }
 
