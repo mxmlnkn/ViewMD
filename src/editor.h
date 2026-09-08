@@ -21,6 +21,9 @@ typedef struct _MarkydEditor {
   /* Absolute path of the document shown in this editor, or NULL. */
   gchar *file_path;
 
+  /* Collapse state for heading/details sections (key -> TRUE when folded). */
+  GHashTable *collapsed;
+
   /* Prevent recursive tag application. */
   gboolean updating_tags;
 

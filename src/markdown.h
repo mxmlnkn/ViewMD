@@ -48,6 +48,19 @@ void markdown_update_accent_tags(GtkTextBuffer *buffer);
 #define VIEWMD_CODE_LANG_DATA "viewmd-code-lang"
 #define VIEWMD_CODE_WIDGET_DATA "viewmd-code-widget"
 
+/* GObject data keys for heading/details fold anchors. */
+#define VIEWMD_FOLD_ANCHOR_DATA "viewmd-fold-anchor"
+#define VIEWMD_FOLD_KEY_DATA "viewmd-fold-key"
+#define VIEWMD_FOLD_STATE_DATA "viewmd-fold-state"
+#define VIEWMD_FOLD_IS_DETAILS_DATA "viewmd-fold-is-details"
+#define VIEWMD_FOLD_WIDGET_DATA "viewmd-fold-widget"
+
+/* Render markdown source into the buffer and apply markdown styling.
+   'collapsed' is an optional GHashTable of heading/details keys that should
+   be rendered collapsed (or NULL to render everything expanded). */
+void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source,
+                         GHashTable *collapsed);
+
 typedef struct {
   gint row;
   gint col;
@@ -67,9 +80,6 @@ gchar *markdown_normalize_anchor_slug(const gchar *text);
 /* Build full text-mark name for an anchor fragment. Caller owns result. */
 gchar *markdown_anchor_mark_name(const gchar *fragment);
 
-/* Render markdown source into the buffer and apply markdown styling. */
-void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source);
-
 /* Build a GTK widget for a table anchor, or NULL if not a table anchor. */
 GtkWidget *markdown_create_table_widget(GtkTextChildAnchor *anchor);
 
@@ -78,5 +88,8 @@ GtkWidget *markdown_create_frontmatter_widget(GtkTextChildAnchor *anchor);
 
 /* Build a GTK widget for a fenced code block anchor, or NULL. */
 GtkWidget *markdown_create_code_block_widget(GtkTextChildAnchor *anchor);
+
+/* Build a GTK widget for a fold toggle anchor (heading or details), or NULL. */
+GtkWidget *markdown_create_fold_widget(GtkTextChildAnchor *anchor);
 
 #endif /* MARKYD_MARKDOWN_H */
