@@ -14,7 +14,6 @@
 #define TAG_ITALIC "italic"
 #define TAG_STRIKE "strike"
 #define TAG_CODE "code"
-#define TAG_CODE_BLOCK "code_block"
 #define TAG_QUOTE "quote"
 #define TAG_LIST "list"
 #define TAG_LIST_BULLET "list_bullet"
@@ -64,12 +63,6 @@ typedef struct {
 } ViewmdTable;
 
 typedef struct {
-  gint start_offset;
-  gint end_offset;
-  const MarkydLanguageHighlight *language;
-} CodeBlockRange;
-
-typedef struct {
   GtkTextBuffer *buffer;
   RenderState *render_state;
   GtkTextIter iter;
@@ -91,9 +84,9 @@ typedef struct {
   gboolean in_image;
   gchar *image_src;
   GString *image_alt;
-  GArray *code_blocks; /* CodeBlockRange */
-  gint current_code_start_offset;
-  const MarkydLanguageHighlight *current_code_language;
+  gboolean in_code_block;
+  GString *code_source;
+  gchar *code_language; /* fenced code block language, or "" */
   gboolean has_output;
   guint trailing_newlines;
 } RenderCtx;
@@ -606,62 +599,213 @@ static void on_code_scan_token(gint start_char_offset, gint end_char_offset,
                             ctx->line_offset + end_char_offset);
 }
 
-static void apply_code_highlighting_for_block(GtkTextBuffer *buffer,
-                                              const CodeBlockRange *range) {
+static void ensure_code_tags(GtkTextBuffer *buffer) {
+  const gchar *kw_a;
+  const gchar *kw_b;
+  const gchar *kw_c;
+  const gchar *literal;
+  gboolean light = g_strcmp0(config->theme, "light") == 0;
+
+  if (!buffer || lookup_tag(buffer, MARKYD_TAG_CODE_KW_A)) {
+    return;
+  }
+
+  if (light) {
+    kw_a = "#cf222e";
+    kw_b = "#953800";
+    kw_c = "#0550ae";
+    literal = "#0a3069";
+  } else {
+    kw_a = "#ff7b72";
+    kw_b = "#ffa657";
+    kw_c = "#79c0ff";
+    literal = "#a5d6ff";
+  }
+
+  gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_KW_A, "family",
+                             config->code_font_family, "foreground", kw_a,
+                             "weight", PANGO_WEIGHT_BOLD, NULL);
+  gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_KW_B, "family",
+                             config->code_font_family, "foreground", kw_b,
+                             "weight", PANGO_WEIGHT_BOLD, NULL);
+  gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_KW_C, "family",
+                             config->code_font_family, "foreground", kw_c,
+                             "weight", PANGO_WEIGHT_BOLD, NULL);
+  gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_LITERAL, "family",
+                             config->code_font_family, "foreground", literal,
+                             NULL);
+}
+
+/* Create a new buffer with the code text and (if a known language) highlighted
+   syntax tags applied. The caller owns the buffer and must drop its ref. */
+static GtkTextBuffer *
+create_highlighted_code_buffer(const gchar *code,
+                               const MarkydLanguageHighlight *language) {
+  GtkTextBuffer *buffer = gtk_text_buffer_new(NULL);
+  const gchar *line_start = code ? code : "";
+  MarkydCodeScanState state = {0};
+  CodeTagApplyContext scan_ctx = {0};
+  GtkTextTag *base_tag;
   GtkTextIter start;
   GtkTextIter end;
-  gchar *text;
-  const gchar *line_start;
-  MarkydCodeScanState state = {0};
-  CodeTagApplyContext ctx = {0};
-  gint line_offset;
+  gint line_offset = 0;
 
-  if (!buffer || !range || !range->language || range->end_offset <= range->start_offset) {
-    return;
+  gtk_text_buffer_set_text(buffer, line_start, -1);
+
+  /* Base color/mono font for untagged text; syntax tags layer on top. */
+  base_tag = gtk_text_buffer_create_tag(buffer, "viewmd-code-plain", "family",
+                                        config->code_font_family, "foreground",
+                                        config->code_foreground, NULL);
+  gtk_text_buffer_get_bounds(buffer, &start, &end);
+  gtk_text_buffer_apply_tag(buffer, base_tag, &start, &end);
+
+  if (!language || !language->scan_line) {
+    return buffer;
   }
 
-  gtk_text_buffer_get_iter_at_offset(buffer, &start, range->start_offset);
-  gtk_text_buffer_get_iter_at_offset(buffer, &end, range->end_offset);
-  text = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
-  if (!text) {
-    return;
-  }
-
+  ensure_code_tags(buffer);
   markyd_code_scan_state_reset(&state);
-  ctx.buffer = buffer;
-  line_offset = range->start_offset;
-  line_start = text;
+  scan_ctx.buffer = buffer;
 
   while (TRUE) {
     const gchar *nl = strchr(line_start, '\n');
     gsize len = nl ? (gsize)(nl - line_start) : strlen(line_start);
     gchar *line = g_strndup(line_start, len);
 
-    ctx.line_offset = line_offset;
-    markyd_code_scan_line(range->language, line, &state, on_code_scan_token, &ctx);
+    scan_ctx.line_offset = line_offset;
+    markyd_code_scan_line(language, line, &state, on_code_scan_token, &scan_ctx);
     line_offset += (gint)g_utf8_strlen(line, -1);
     g_free(line);
 
     if (!nl) {
       break;
     }
-
-    line_offset += 1; /* '\n' */
+    line_offset += 1;
     line_start = nl + 1;
   }
 
-  g_free(text);
+  return buffer;
 }
 
-static void apply_code_highlighting(GtkTextBuffer *buffer, GArray *code_blocks) {
-  if (!buffer || !code_blocks || code_blocks->len == 0) {
+static void on_code_copy_clicked(GtkButton *button, gpointer user_data) {
+  const gchar *code = (const gchar *)user_data;
+  GtkClipboard *clip = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+  (void)button;
+  gtk_clipboard_set_text(clip, code ? code : "", -1);
+}
+
+static void code_widget_text_view_setup(GtkTextView *text_view) {
+  gtk_text_view_set_editable(text_view, FALSE);
+  gtk_text_view_set_cursor_visible(text_view, FALSE);
+  /* Long lines wrap instead of blowing the block up to thousands of pixels
+     (that also produced invalid 'width: 2599, height: -1' allocations while
+     scrolling). */
+  gtk_text_view_set_wrap_mode(text_view, GTK_WRAP_CHAR);
+  gtk_widget_set_size_request(GTK_WIDGET(text_view), 480, -1);
+  gtk_text_view_set_top_margin(text_view, 8);
+  gtk_text_view_set_bottom_margin(text_view, 8);
+  gtk_text_view_set_left_margin(text_view, 12);
+  gtk_text_view_set_right_margin(text_view, 12);
+  gtk_widget_set_hexpand(GTK_WIDGET(text_view), TRUE);
+  gtk_text_view_set_accepts_tab(text_view, FALSE);
+}
+
+GtkWidget *markdown_create_code_block_widget(GtkTextChildAnchor *anchor) {
+  gchar *code;
+  gchar *lang;
+  GtkWidget *box;
+  GtkWidget *header;
+  GtkWidget *lang_label;
+  GtkWidget *copy_button;
+  GtkTextBuffer *code_buffer;
+  GtkWidget *code_view;
+  const MarkydLanguageHighlight *language;
+
+  if (!anchor) {
+    return NULL;
+  }
+  code = g_object_get_data(G_OBJECT(anchor), VIEWMD_CODE_SRC_DATA);
+  lang = g_object_get_data(G_OBJECT(anchor), VIEWMD_CODE_LANG_DATA);
+  language = (lang && lang[0]) ? markyd_code_lookup_language(lang) : NULL;
+
+  box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_style_context_add_class(gtk_widget_get_style_context(box),
+                              "viewmd-code-block");
+  gtk_widget_set_halign(box, GTK_ALIGN_FILL);
+  gtk_widget_set_valign(box, GTK_ALIGN_START);
+  gtk_widget_set_hexpand(box, TRUE);
+  gtk_widget_set_vexpand(box, FALSE);
+  gtk_widget_set_margin_top(box, 8);
+  gtk_widget_set_margin_bottom(box, 8);
+  gtk_widget_set_margin_start(box, 4);
+  gtk_widget_set_margin_end(box, 4);
+
+  header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_style_context_add_class(gtk_widget_get_style_context(header),
+                              "viewmd-code-header");
+  gtk_box_pack_start(GTK_BOX(box), header, FALSE, FALSE, 0);
+
+  lang_label = gtk_label_new(lang && lang[0] ? lang : "code");
+  gtk_widget_set_halign(lang_label, GTK_ALIGN_START);
+  gtk_box_pack_start(GTK_BOX(header), lang_label, TRUE, TRUE, 0);
+
+  copy_button = gtk_button_new_from_icon_name("edit-copy-symbolic",
+                                               GTK_ICON_SIZE_MENU);
+  gtk_widget_set_focus_on_click(copy_button, FALSE);
+  gtk_button_set_relief(GTK_BUTTON(copy_button), GTK_RELIEF_NONE);
+  gtk_widget_set_tooltip_text(copy_button, "Copy code to clipboard");
+  gtk_style_context_add_class(gtk_widget_get_style_context(copy_button),
+                              "viewmd-copy-button");
+  g_signal_connect(copy_button, "clicked", G_CALLBACK(on_code_copy_clicked),
+                   code);
+  gtk_box_pack_end(GTK_BOX(header), copy_button, FALSE, FALSE, 0);
+
+  code_buffer = create_highlighted_code_buffer(code, language);
+  code_view = gtk_text_view_new_with_buffer(code_buffer);
+  code_widget_text_view_setup(GTK_TEXT_VIEW(code_view));
+  g_object_unref(code_buffer);
+  gtk_box_pack_start(GTK_BOX(box), code_view, FALSE, FALSE, 0);
+
+  return box;
+}
+
+static void emit_code_block_anchor(RenderCtx *ctx) {
+  GtkTextChildAnchor *anchor;
+  gchar *code;
+  gint start_offset;
+  gint end_offset;
+  gboolean saved_has_output;
+  guint saved_trailing_newlines;
+
+  if (!ctx || !ctx->code_source) {
     return;
   }
 
-  for (guint i = 0; i < code_blocks->len; i++) {
-    CodeBlockRange *range = &g_array_index(code_blocks, CodeBlockRange, i);
-    apply_code_highlighting_for_block(buffer, range);
+  code = g_strdup(ctx->code_source->str);
+  anchor = gtk_text_buffer_create_child_anchor(ctx->buffer, &ctx->iter);
+  note_non_newline_output(ctx);
+  g_object_set_data(G_OBJECT(anchor), VIEWMD_CODE_BLOCK_DATA,
+                    GINT_TO_POINTER(1));
+  g_object_set_data_full(G_OBJECT(anchor), VIEWMD_CODE_SRC_DATA, code,
+                         g_free);
+  g_object_set_data_full(G_OBJECT(anchor), VIEWMD_CODE_LANG_DATA,
+                         g_strdup(ctx->code_language ? ctx->code_language : ""),
+                         g_free);
+
+  /* Keep the source text findable via Ctrl+F without showing it twice. */
+  saved_has_output = ctx->has_output;
+  saved_trailing_newlines = ctx->trailing_newlines;
+  start_offset = gtk_text_iter_get_offset(&ctx->iter);
+  gtk_text_buffer_insert(ctx->buffer, &ctx->iter, code, -1);
+  end_offset = gtk_text_iter_get_offset(&ctx->iter);
+  if (end_offset > start_offset) {
+    apply_tag_by_name_offsets(ctx->buffer, TAG_INVISIBLE, start_offset,
+                              end_offset);
   }
+  ctx->has_output = saved_has_output;
+  ctx->trailing_newlines = saved_trailing_newlines;
+
+  insert_cstr(ctx, "\n");
 }
 
 gchar *markdown_normalize_anchor_slug(const gchar *text) {
@@ -1154,18 +1298,18 @@ static int on_enter_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
   }
 
   case MD_BLOCK_CODE:
-    ctx->current_code_start_offset = gtk_text_iter_get_offset(&ctx->iter);
-    {
-      gchar *language =
-          extract_code_language_from_detail((MD_BLOCK_CODE_DETAIL *)detail);
-      ctx->current_code_language = markyd_code_lookup_language(language);
-      g_free(language);
-    }
     ensure_newlines(ctx, 2);
-    push_active_tag_by_name(ctx, TAG_CODE_BLOCK,
-                            &g_array_index(ctx->block_stack, BlockState,
-                                           ctx->block_stack->len - 1)
-                                 .pushed_tags);
+    ctx->in_code_block = TRUE;
+    if (ctx->code_source) {
+      g_string_free(ctx->code_source, TRUE);
+    }
+    ctx->code_source = g_string_new(NULL);
+    g_free(ctx->code_language);
+    ctx->code_language =
+        extract_code_language_from_detail((MD_BLOCK_CODE_DETAIL *)detail);
+    if (!ctx->code_language) {
+      ctx->code_language = g_strdup("");
+    }
     break;
 
   case MD_BLOCK_HTML:
@@ -1225,16 +1369,14 @@ static int on_leave_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
     ctx->list_item_prefix_pending = FALSE;
     ensure_newlines(ctx, 1);
   } else if (type == MD_BLOCK_CODE) {
-    if (ctx->code_blocks && ctx->current_code_start_offset >= 0) {
-      CodeBlockRange range = {ctx->current_code_start_offset,
-                              gtk_text_iter_get_offset(&ctx->iter),
-                              ctx->current_code_language};
-      if (range.end_offset > range.start_offset) {
-        g_array_append_val(ctx->code_blocks, range);
-      }
+    emit_code_block_anchor(ctx);
+    ctx->in_code_block = FALSE;
+    if (ctx->code_source) {
+      g_string_free(ctx->code_source, TRUE);
+      ctx->code_source = NULL;
     }
-    ctx->current_code_start_offset = -1;
-    ctx->current_code_language = NULL;
+    g_clear_pointer(&ctx->code_language, g_free);
+    ensure_newlines(ctx, 1);
   } else if (type == MD_BLOCK_TH || type == MD_BLOCK_TD) {
     table_finish_cell(ctx);
   } else if (type == MD_BLOCK_TR) {
@@ -1380,7 +1522,9 @@ static int on_text(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size,
   if (ctx->list_item_prefix_pending && rendered[0] != '\0') {
     ctx->list_item_prefix_pending = FALSE;
   }
-  if (ctx->in_image) {
+  if (ctx->in_code_block) {
+    g_string_append(ctx->code_source, rendered);
+  } else if (ctx->in_image) {
     if (!ctx->image_alt) {
       ctx->image_alt = g_string_new(NULL);
     }
@@ -1417,10 +1561,6 @@ void markdown_init_tags(GtkTextBuffer *buffer) {
                              config->code_font_family, "background",
                              config->inline_code_background, "foreground",
                              config->inline_code_foreground, NULL);
-  gtk_text_buffer_create_tag(
-      buffer, TAG_CODE_BLOCK, "family", config->code_font_family, "foreground",
-      config->code_foreground, "paragraph-background",
-      config->code_background, "left-margin", 24, "right-margin", 16, NULL);
 
   gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_KW_A, "family",
                              config->code_font_family, "foreground",
@@ -1527,12 +1667,6 @@ void markdown_update_accent_tags(GtkTextBuffer *buffer) {
     g_object_set(tag, "family", config->code_font_family, "foreground",
                  config->inline_code_foreground, "background",
                  config->inline_code_background, NULL);
-  }
-  tag = gtk_text_tag_table_lookup(table, TAG_CODE_BLOCK);
-  if (tag) {
-    g_object_set(tag, "family", config->code_font_family, "foreground",
-                 config->code_foreground, "paragraph-background",
-                 config->code_background, NULL);
   }
   tag = gtk_text_tag_table_lookup(table, TAG_QUOTE);
   if (tag) {
@@ -1793,10 +1927,7 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
   ctx.block_stack = g_array_new(FALSE, FALSE, sizeof(BlockState));
   ctx.span_stack = g_array_new(FALSE, FALSE, sizeof(SpanState));
   ctx.list_stack = g_array_new(FALSE, FALSE, sizeof(ListState));
-  ctx.code_blocks = g_array_new(FALSE, FALSE, sizeof(CodeBlockRange));
   ctx.anchor_counts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-  ctx.current_code_start_offset = -1;
-  ctx.current_code_language = NULL;
   ctx.heading_start_offset = 0;
   ctx.has_output = FALSE;
   ctx.trailing_newlines = 0;
@@ -1829,10 +1960,12 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
   if (rc != 0) {
     reset_render_state(buffer);
     gtk_text_buffer_set_text(buffer, input, -1);
-  } else {
-    apply_code_highlighting(buffer, ctx.code_blocks);
   }
 
+  if (ctx.code_source) {
+    g_string_free(ctx.code_source, TRUE);
+  }
+  g_free(ctx.code_language);
   if (ctx.table_cell_text) {
     g_string_free(ctx.table_cell_text, TRUE);
   }
@@ -1848,7 +1981,6 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
   }
   g_hash_table_destroy(ctx.anchor_counts);
   g_array_free(ctx.list_stack, TRUE);
-  g_array_free(ctx.code_blocks, TRUE);
   g_array_free(ctx.span_stack, TRUE);
   g_array_free(ctx.block_stack, TRUE);
   g_ptr_array_free(ctx.active_tags, TRUE);
