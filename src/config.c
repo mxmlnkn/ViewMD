@@ -9,25 +9,61 @@ MarkydConfig *config = NULL;
 
 static gchar *config_path = NULL;
 
+static const gchar *theme_default_str(const gchar *theme, const gchar *dark,
+                                      const gchar *light) {
+  return g_strcmp0(theme, "light") == 0 ? light : dark;
+}
+
+void config_apply_theme_colors(MarkydConfig *cfg) {
+  const gchar *theme = cfg->theme ? cfg->theme : "dark";
+  gboolean light = g_strcmp0(theme, "light") == 0;
+
+  g_free(cfg->background_color);
+  cfg->background_color = g_strdup(theme_default_str(theme, "#000000", "#ffffff"));
+  g_free(cfg->text_color);
+  cfg->text_color = g_strdup(theme_default_str(theme, "#ffffff", "#1f2328"));
+
+  g_free(cfg->code_background);
+  cfg->code_background = g_strdup(theme_default_str(theme, "#161b22", "#f6f8fa"));
+  g_free(cfg->code_foreground);
+  cfg->code_foreground = g_strdup(theme_default_str(theme, "#e6edf3", "#1f2328"));
+
+  g_free(cfg->inline_code_background);
+  cfg->inline_code_background =
+      g_strdup(theme_default_str(theme, "#161b22", "#f6f8fa"));
+  g_free(cfg->inline_code_foreground);
+  cfg->inline_code_foreground =
+      g_strdup(theme_default_str(theme, "#ffa657", "#9a6700"));
+
+  g_free(cfg->h1_color);
+  cfg->h1_color = g_strdup(theme_default_str(theme, "#e6edf3", "#1f2328"));
+  g_free(cfg->h2_color);
+  cfg->h2_color = g_strdup(theme_default_str(theme, "#e6edf3", "#1f2328"));
+  g_free(cfg->h3_color);
+  cfg->h3_color = g_strdup(theme_default_str(theme, "#e6edf3", "#1f2328"));
+  g_free(cfg->list_bullet_color);
+  cfg->list_bullet_color =
+      g_strdup(theme_default_str(theme, "#e6edf3", "#1f2328"));
+
+  (void)light;
+}
+
 MarkydConfig *config_new(void) {
   MarkydConfig *cfg = g_new0(MarkydConfig, 1);
 
   /* Default values */
   cfg->window_x = -1;
   cfg->window_y = -1;
-  cfg->window_width = 600;
+  cfg->window_width = 800;
   cfg->window_height = 700;
   cfg->window_maximized = FALSE;
 
   cfg->font_family = g_strdup("Cantarell");
+  cfg->code_font_family = g_strdup("Monospace");
   cfg->font_size = 16;
   cfg->theme = g_strdup("dark");
 
-  /* Markdown accent defaults (match previous hardcoded colors) */
-  cfg->h1_color = g_strdup("#61AFEF");
-  cfg->h2_color = g_strdup("#C678DD");
-  cfg->h3_color = g_strdup("#E5C07B");
-  cfg->list_bullet_color = g_strdup("#61AFEF");
+  config_apply_theme_colors(cfg);
 
   cfg->line_numbers = FALSE;
   cfg->word_wrap = TRUE;
@@ -39,7 +75,14 @@ void config_free(MarkydConfig *cfg) {
   if (!cfg)
     return;
   g_free(cfg->font_family);
+  g_free(cfg->code_font_family);
   g_free(cfg->theme);
+  g_free(cfg->background_color);
+  g_free(cfg->text_color);
+  g_free(cfg->code_background);
+  g_free(cfg->code_foreground);
+  g_free(cfg->inline_code_background);
+  g_free(cfg->inline_code_foreground);
   g_free(cfg->h1_color);
   g_free(cfg->h2_color);
   g_free(cfg->h3_color);
@@ -96,12 +139,52 @@ gboolean config_load(MarkydConfig *cfg) {
     cfg->font_family =
         g_key_file_get_string(keyfile, "Appearance", "font_family", NULL);
   }
+  if (g_key_file_has_key(keyfile, "Appearance", "code_font_family", NULL)) {
+    g_free(cfg->code_font_family);
+    cfg->code_font_family =
+        g_key_file_get_string(keyfile, "Appearance", "code_font_family", NULL);
+  }
   if (g_key_file_has_key(keyfile, "Appearance", "font_size", NULL))
     cfg->font_size =
         g_key_file_get_integer(keyfile, "Appearance", "font_size", NULL);
   if (g_key_file_has_key(keyfile, "Appearance", "theme", NULL)) {
     g_free(cfg->theme);
     cfg->theme = g_key_file_get_string(keyfile, "Appearance", "theme", NULL);
+  }
+
+  /* The palette follows the selected theme; per-color keys override it below. */
+  config_apply_theme_colors(cfg);
+
+  /* Document colors */
+  if (g_key_file_has_key(keyfile, "Colors", "background_color", NULL)) {
+    g_free(cfg->background_color);
+    cfg->background_color = g_key_file_get_string(
+        keyfile, "Colors", "background_color", NULL);
+  }
+  if (g_key_file_has_key(keyfile, "Colors", "text_color", NULL)) {
+    g_free(cfg->text_color);
+    cfg->text_color =
+        g_key_file_get_string(keyfile, "Colors", "text_color", NULL);
+  }
+  if (g_key_file_has_key(keyfile, "Colors", "code_background", NULL)) {
+    g_free(cfg->code_background);
+    cfg->code_background = g_key_file_get_string(
+        keyfile, "Colors", "code_background", NULL);
+  }
+  if (g_key_file_has_key(keyfile, "Colors", "code_foreground", NULL)) {
+    g_free(cfg->code_foreground);
+    cfg->code_foreground = g_key_file_get_string(
+        keyfile, "Colors", "code_foreground", NULL);
+  }
+  if (g_key_file_has_key(keyfile, "Colors", "inline_code_background", NULL)) {
+    g_free(cfg->inline_code_background);
+    cfg->inline_code_background = g_key_file_get_string(
+        keyfile, "Colors", "inline_code_background", NULL);
+  }
+  if (g_key_file_has_key(keyfile, "Colors", "inline_code_foreground", NULL)) {
+    g_free(cfg->inline_code_foreground);
+    cfg->inline_code_foreground = g_key_file_get_string(
+        keyfile, "Colors", "inline_code_foreground", NULL);
   }
 
   /* Markdown accents */
@@ -154,8 +237,23 @@ gboolean config_save(MarkydConfig *cfg) {
 
   /* Appearance */
   g_key_file_set_string(keyfile, "Appearance", "font_family", cfg->font_family);
+  g_key_file_set_string(keyfile, "Appearance", "code_font_family",
+                        cfg->code_font_family);
   g_key_file_set_integer(keyfile, "Appearance", "font_size", cfg->font_size);
   g_key_file_set_string(keyfile, "Appearance", "theme", cfg->theme);
+
+  /* Colors */
+  g_key_file_set_string(keyfile, "Colors", "background_color",
+                        cfg->background_color);
+  g_key_file_set_string(keyfile, "Colors", "text_color", cfg->text_color);
+  g_key_file_set_string(keyfile, "Colors", "code_background",
+                        cfg->code_background);
+  g_key_file_set_string(keyfile, "Colors", "code_foreground",
+                        cfg->code_foreground);
+  g_key_file_set_string(keyfile, "Colors", "inline_code_background",
+                        cfg->inline_code_background);
+  g_key_file_set_string(keyfile, "Colors", "inline_code_foreground",
+                        cfg->inline_code_foreground);
 
   /* Markdown accents */
   g_key_file_set_string(keyfile, "Markdown", "h1_color", cfg->h1_color);

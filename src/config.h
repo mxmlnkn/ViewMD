@@ -14,8 +14,21 @@ typedef struct _MarkydConfig {
 
   /* Appearance */
   gchar *font_family;
+  gchar *code_font_family;
   gint font_size; /* in points */
   gchar *theme;   /* "dark", "light", "system" */
+
+  /* Document colors (only used for the "dark" and "light" themes) */
+  gchar *background_color;
+  gchar *text_color;
+
+  /* Code block colors */
+  gchar *code_background;
+  gchar *code_foreground;
+
+  /* Inline code colors */
+  gchar *inline_code_background;
+  gchar *inline_code_foreground;
 
   /* Markdown accent colors */
   gchar *h1_color;
@@ -34,6 +47,9 @@ extern MarkydConfig *config;
 /* Lifecycle */
 MarkydConfig *config_new(void);
 void config_free(MarkydConfig *cfg);
+
+/* Apply the default color palette for the configured theme. */
+void config_apply_theme_colors(MarkydConfig *cfg);
 
 /* Load/Save */
 gboolean config_load(MarkydConfig *cfg);
