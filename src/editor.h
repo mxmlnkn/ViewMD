@@ -27,6 +27,10 @@ typedef struct _MarkydEditor {
   /* Headings of the current document (ViewmdHeading*), newest render last. */
   GPtrArray *headings;
 
+  /* Remote image loading decision for this document ("ask" mode). */
+  gboolean remote_images_decided;
+  gboolean remote_images_allowed;
+
   /* Optional hook invoked after a full re-render (used for the ToC). */
   void (*on_rendered)(struct _MarkydEditor *editor);
 

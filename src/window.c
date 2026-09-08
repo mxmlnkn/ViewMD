@@ -2139,6 +2139,27 @@ static void on_code_font_family_changed(GtkComboBoxText *combo,
   config->code_font_family = gtk_combo_box_text_get_active_text(combo);
 }
 
+static void on_remote_images_changed(GtkComboBoxText *combo,
+                                     gpointer user_data) {
+  const gchar *policies[] = {"ask", "always", "never"};
+  const gchar *labels[] = {"Ask per document", "Always load", "Never load"};
+  const gchar *sel;
+  gint idx;
+
+  (void)user_data;
+  sel = gtk_combo_box_text_get_active_text(combo);
+  idx = 0;
+  for (gint i = 0; i < 3; i++) {
+    if (g_strcmp0(sel, labels[i]) == 0) {
+      idx = i;
+      break;
+    }
+  }
+  g_free(config->remote_images);
+  config->remote_images = g_strdup(policies[idx]);
+  g_free((gchar *)sel);
+}
+
 static void on_theme_changed(GtkComboBoxText *combo, gpointer user_data) {
   SettingsUi *ui = (SettingsUi *)user_data;
 
@@ -2242,6 +2263,30 @@ static GtkWidget *create_settings_dialog(MarkydWindow *win) {
                    ui);
   gtk_widget_set_hexpand(ui->theme_combo, TRUE);
   gtk_grid_attach(GTK_GRID(grid), ui->theme_combo, 1, row++, 1, 1);
+
+  label = gtk_label_new("Remote images:");
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
+
+  {
+    GtkWidget *remote_combo = gtk_combo_box_text_new();
+    const gchar *policies[] = {"ask", "always", "never"};
+    const gchar *labels[] = {"Ask per document", "Always load", "Never load"};
+    gint idx = 0;
+
+    for (gint i = 0; i < 3; i++) {
+      gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(remote_combo),
+                                     labels[i]);
+      if (g_strcmp0(config->remote_images, policies[i]) == 0) {
+        idx = i;
+      }
+    }
+    gtk_combo_box_set_active(GTK_COMBO_BOX(remote_combo), idx);
+    g_signal_connect(remote_combo, "changed",
+                     G_CALLBACK(on_remote_images_changed), NULL);
+    gtk_widget_set_hexpand(remote_combo, TRUE);
+    gtk_grid_attach(GTK_GRID(grid), remote_combo, 1, row++, 1, 1);
+  }
 
   label = gtk_label_new("Font:");
   gtk_widget_set_halign(label, GTK_ALIGN_END);
