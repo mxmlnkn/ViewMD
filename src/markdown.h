@@ -42,6 +42,12 @@ void markdown_update_accent_tags(GtkTextBuffer *buffer);
 /* GObject data key set on frontmatter anchors once the widget has been built. */
 #define VIEWMD_FRONTMATTER_WIDGET_DATA "viewmd-frontmatter-widget"
 
+/* GObject data keys for fenced code block anchors and widgets. */
+#define VIEWMD_CODE_BLOCK_DATA "viewmd-code-block"
+#define VIEWMD_CODE_SRC_DATA "viewmd-code-src"
+#define VIEWMD_CODE_LANG_DATA "viewmd-code-lang"
+#define VIEWMD_CODE_WIDGET_DATA "viewmd-code-widget"
+
 typedef struct {
   gint row;
   gint col;
@@ -69,5 +75,8 @@ GtkWidget *markdown_create_table_widget(GtkTextChildAnchor *anchor);
 
 /* Build a GTK widget for a YAML frontmatter anchor, or NULL. */
 GtkWidget *markdown_create_frontmatter_widget(GtkTextChildAnchor *anchor);
+
+/* Build a GTK widget for a fenced code block anchor, or NULL. */
+GtkWidget *markdown_create_code_block_widget(GtkTextChildAnchor *anchor);
 
 #endif /* MARKYD_MARKDOWN_H */

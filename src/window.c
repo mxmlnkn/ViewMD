@@ -1343,7 +1343,6 @@ void markyd_window_apply_css(MarkydWindow *self) {
       "}"
       ".viewmd-code-block textview text {"
       "  background-color: %s;"
-      "  color: %s;"
       "}"
       ".viewmd-fold-toggle {"
       "  background-color: transparent;"
@@ -1366,7 +1365,7 @@ void markyd_window_apply_css(MarkydWindow *self) {
       table_bg, table_border, table_fg, table_bg, table_fg, search_match_bg,
       search_match_fg, search_current_bg, search_current_fg, code_bg, code_bg,
       code_fg, code_fg, code_bg, code_fg, config->code_font_family,
-      config->font_size, code_bg, code_fg, fg, fg);
+      config->font_size, code_bg, fg, fg);
 
   gtk_css_provider_load_from_data(css, css_str, -1, NULL);
   g_free(css_str);

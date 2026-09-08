@@ -14,7 +14,8 @@ static void apply_markdown(MarkydEditor *self);
 static void schedule_markdown_apply(MarkydEditor *self);
 static void render_image_widgets(MarkydEditor *self);
 static void render_table_widgets(MarkydEditor *self);
-static void render_frontmatter_widgets(MarkydEditor *self);static void refresh_image_widget_scales(MarkydEditor *self);
+static void render_frontmatter_widgets(MarkydEditor *self);
+static void render_code_block_widgets(MarkydEditor *self);static void refresh_image_widget_scales(MarkydEditor *self);
 static gboolean resolve_image_source_path(MarkydEditor *self, const gchar *src,
                                           gchar **out_path);
 static void on_text_view_size_allocate(GtkWidget *widget, GtkAllocation *allocation,
@@ -144,6 +145,7 @@ static void apply_markdown(MarkydEditor *self) {
   render_image_widgets(self);
   render_table_widgets(self);
   render_frontmatter_widgets(self);
+  render_code_block_widgets(self);
   refresh_image_widget_scales(self);
   self->updating_tags = FALSE;
 }
@@ -381,6 +383,35 @@ static void render_frontmatter_widgets(MarkydEditor *self) {
           gtk_widget_show_all(widget);
           g_object_set_data(G_OBJECT(anchor), VIEWMD_FRONTMATTER_WIDGET_DATA,
                             widget);
+        }
+      }
+    }
+    gtk_text_iter_forward_char(&iter);
+  }
+}
+
+static void render_code_block_widgets(MarkydEditor *self) {
+  GtkTextIter iter;
+  GtkTextIter end;
+
+  if (!self || !self->buffer || !self->text_view) {
+    return;
+  }
+
+  gtk_text_buffer_get_bounds(self->buffer, &iter, &end);
+  while (!gtk_text_iter_equal(&iter, &end)) {
+    GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(&iter);
+    if (anchor &&
+        g_object_get_data(G_OBJECT(anchor), VIEWMD_CODE_BLOCK_DATA) != NULL) {
+      GtkWidget *widget =
+          g_object_get_data(G_OBJECT(anchor), VIEWMD_CODE_WIDGET_DATA);
+      if (!widget) {
+        widget = markdown_create_code_block_widget(anchor);
+        if (widget) {
+          gtk_text_view_add_child_at_anchor(GTK_TEXT_VIEW(self->text_view),
+                                            widget, anchor);
+          gtk_widget_show_all(widget);
+          g_object_set_data(G_OBJECT(anchor), VIEWMD_CODE_WIDGET_DATA, widget);
         }
       }
     }
