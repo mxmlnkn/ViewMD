@@ -436,7 +436,12 @@ void markyd_editor_set_content(MarkydEditor *self, const gchar *content) {
   }
 
   g_free(self->source_content);
-  self->source_content = g_strdup(content ? content : "");
+  /* Guard against non-UTF-8 markdown (e.g. latin-1) crashing Pango later. */
+  if (content) {
+    self->source_content = g_utf8_make_valid(content, -1);
+  } else {
+    self->source_content = g_strdup("");
+  }
   schedule_markdown_apply(self);
 }
 
