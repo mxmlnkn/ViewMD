@@ -415,6 +415,146 @@ static gchar *attr_to_string(const MD_ATTRIBUTE *attr) {
   return g_string_free(result, FALSE);
 }
 
+static const gchar *line_end_pos(const gchar *s) {
+  const gchar *nl = strchr(s, '\n');
+  if (!nl) {
+    return s + strlen(s);
+  }
+  return nl; /* excluding '\n' */
+}
+
+static gboolean line_trimmed_equals(const gchar *line, const gchar *end,
+                                    const gchar *word) {
+  const gchar *p = line;
+  const gchar *q = end;
+  gsize len;
+
+  while (p < end && (*p == ' ' || *p == '\t' || *p == '\r')) {
+    p++;
+  }
+  while (q > p && (q[-1] == ' ' || q[-1] == '\t' || q[-1] == '\r')) {
+    q--;
+  }
+  len = (gsize)(q - p);
+  return len == strlen(word) && strncmp(p, word, len) == 0;
+}
+
+static gchar *strip_quotes(const gchar *text) {
+  gsize len;
+  gchar *out;
+
+  if (!text) {
+    return g_strdup("");
+  }
+  out = g_strdup(text);
+  g_strstrip(out);
+  len = strlen(out);
+  if (len >= 2 && ((out[0] == '"' && out[len - 1] == '"') ||
+                   (out[0] == '\'' && out[len - 1] == '\''))) {
+    out[len - 1] = '\0';
+    memmove(out, out + 1, strlen(out + 1) + 1);
+  }
+  return out;
+}
+
+static void frontmatter_pairs_free(gpointer data) {
+  GPtrArray *pairs = (GPtrArray *)data;
+  if (!pairs) {
+    return;
+  }
+  g_ptr_array_free(pairs, TRUE);
+}
+
+/* Returns a GPtrArray of "key\tvalue" strings for a leading YAML frontmatter
+   block, or NULL. *out_body points past the closing delimiter. */
+static GPtrArray *parse_frontmatter(const gchar *source,
+                                    const gchar **out_body) {
+  const gchar *cursor;
+  const gchar *block_start;
+  const gchar *block_end;
+  const gchar *line;
+  GPtrArray *pairs;
+  gboolean has_key = FALSE;
+
+  *out_body = source;
+  if (!source || strncmp(source, "---", 3) != 0 ||
+      !line_trimmed_equals(source, line_end_pos(source), "---")) {
+    return NULL;
+  }
+
+  cursor = line_end_pos(source);
+  if (*cursor == '\n') {
+    cursor++;
+  }
+  block_start = cursor;
+  block_end = NULL;
+  while (*cursor) {
+    const gchar *le = line_end_pos(cursor);
+    if (line_trimmed_equals(cursor, le, "---") ||
+        line_trimmed_equals(cursor, le, "...")) {
+      block_end = cursor;
+      break;
+    }
+    if (!*le) {
+      break;
+    }
+    cursor = le;
+    if (*cursor == '\n') {
+      cursor++;
+    }
+  }
+  if (!block_end) {
+    return NULL;
+  }
+
+  cursor = line_end_pos(block_end);
+  if (*cursor == '\n') {
+    cursor++;
+  }
+
+  pairs = g_ptr_array_new_with_free_func(g_free);
+  line = block_start;
+  while (line < block_end) {
+    const gchar *le = line_end_pos(line);
+    const gchar *sep = memchr(line, ':', (gsize)(le - line));
+    if (sep && !line_trimmed_equals(line, le, "")) {
+      gchar *key = g_strndup(line, (gsize)(sep - line));
+      g_strstrip(key);
+      if (key[0] != '\0' && key[0] != '#') {
+        gchar *raw_value;
+        gchar *value;
+        has_key = TRUE;
+        raw_value = g_strndup(sep + 1, (gsize)(le - (sep + 1)));
+        value = strip_quotes(raw_value);
+        if (value[0] != '\0') {
+          g_ptr_array_add(pairs, g_strdup_printf("%s\t%s", key, value));
+        }
+        g_free(value);
+        g_free(raw_value);
+      }
+      g_free(key);
+    }
+    if (!*le) {
+      break;
+    }
+    line = le;
+    if (*line == '\n') {
+      line++;
+    }
+  }
+
+  if (!has_key) {
+    g_ptr_array_free(pairs, TRUE);
+    return NULL;
+  }
+  *out_body = cursor;
+  if (pairs->len == 0) {
+    g_ptr_array_free(pairs, TRUE);
+    return NULL;
+  }
+  return pairs;
+}
+
 static gchar *extract_code_language_from_detail(MD_BLOCK_CODE_DETAIL *code) {
   gchar *lang;
   gchar *info;
@@ -1511,6 +1651,127 @@ GtkWidget *markdown_create_table_widget(GtkTextChildAnchor *anchor) {
   return wrapper;
 }
 
+static void insert_frontmatter(RenderCtx *ctx, GPtrArray *pairs) {
+  GtkTextChildAnchor *anchor;
+  gint start_offset;
+  gint end_offset;
+  GString *search;
+  gboolean first = TRUE;
+
+  anchor = gtk_text_buffer_create_child_anchor(ctx->buffer, &ctx->iter);
+  g_object_set_data(G_OBJECT(anchor), VIEWMD_FRONTMATTER_DATA,
+                    GINT_TO_POINTER(1));
+  g_object_set_data_full(G_OBJECT(anchor), "viewmd-frontmatter-pairs", pairs,
+                         frontmatter_pairs_free);
+
+  /* Keep the fields findable via Ctrl+F without showing them twice. */
+  start_offset = gtk_text_iter_get_offset(&ctx->iter);
+  search = g_string_new(NULL);
+  for (guint i = 0; i < pairs->len; i++) {
+    const gchar *entry = g_ptr_array_index(pairs, i);
+    const gchar *tab = strchr(entry, '\t');
+    if (!tab) {
+      continue;
+    }
+    if (!first) {
+      g_string_append_c(search, ' ');
+    }
+    g_string_append_len(search, entry, (gsize)(tab - entry));
+    g_string_append_c(search, ' ');
+    g_string_append(search, tab + 1);
+    first = FALSE;
+  }
+  gtk_text_buffer_insert(ctx->buffer, &ctx->iter, search->str, search->len);
+  end_offset = gtk_text_iter_get_offset(&ctx->iter);
+  g_string_free(search, TRUE);
+  if (end_offset > start_offset) {
+    apply_tag_by_name_offsets(ctx->buffer, TAG_INVISIBLE, start_offset,
+                              end_offset);
+  }
+  insert_cstr(ctx, "\n");
+}
+
+static GtkWidget *frontmatter_cell(const gchar *text, gboolean header) {
+  GtkWidget *cell = gtk_event_box_new();
+  GtkWidget *label = gtk_label_new(NULL);
+
+  gtk_style_context_add_class(gtk_widget_get_style_context(cell),
+                              "viewmd-table-cell");
+  if (header) {
+    gtk_style_context_add_class(gtk_widget_get_style_context(cell),
+                                "viewmd-table-header-cell");
+  }
+  gtk_widget_set_hexpand(cell, FALSE);
+  gtk_widget_set_vexpand(cell, FALSE);
+  gtk_container_add(GTK_CONTAINER(cell), label);
+
+  gtk_style_context_add_class(gtk_widget_get_style_context(label),
+                              "viewmd-table-label");
+  gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+  gtk_label_set_yalign(GTK_LABEL(label), 0.5f);
+  gtk_widget_set_margin_start(label, 8);
+  gtk_widget_set_margin_end(label, 8);
+  gtk_widget_set_margin_top(label, header ? 6 : 5);
+  gtk_widget_set_margin_bottom(label, header ? 6 : 5);
+  gtk_label_set_text(GTK_LABEL(label), text);
+
+  return cell;
+}
+
+GtkWidget *markdown_create_frontmatter_widget(GtkTextChildAnchor *anchor) {
+  GPtrArray *pairs;
+  GtkWidget *wrapper;
+  GtkWidget *grid;
+
+  if (!anchor) {
+    return NULL;
+  }
+  pairs = g_object_get_data(G_OBJECT(anchor), "viewmd-frontmatter-pairs");
+  if (!pairs || pairs->len == 0) {
+    return NULL;
+  }
+
+  wrapper = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_style_context_add_class(gtk_widget_get_style_context(wrapper),
+                              "viewmd-table");
+  gtk_widget_set_halign(wrapper, GTK_ALIGN_START);
+  gtk_widget_set_margin_top(wrapper, 6);
+  gtk_widget_set_margin_bottom(wrapper, 6);
+  gtk_widget_set_margin_start(wrapper, 8);
+  gtk_widget_set_margin_end(wrapper, 8);
+
+  grid = gtk_grid_new();
+  gtk_style_context_add_class(gtk_widget_get_style_context(grid),
+                              "viewmd-table-grid");
+  gtk_grid_set_row_spacing(GTK_GRID(grid), 0);
+  gtk_grid_set_column_spacing(GTK_GRID(grid), 0);
+  gtk_box_pack_start(GTK_BOX(wrapper), grid, TRUE, TRUE, 0);
+
+  gtk_grid_attach(GTK_GRID(grid), frontmatter_cell("Property", TRUE), 0, 0, 1, 1);
+  gtk_grid_attach(GTK_GRID(grid), frontmatter_cell("Value", TRUE), 1, 0, 1, 1);
+
+  for (guint i = 0; i < pairs->len; i++) {
+    const gchar *entry = g_ptr_array_index(pairs, i);
+    const gchar *tab = strchr(entry, '\t');
+    gchar *key;
+    gchar *value;
+    guint row = i + 1;
+
+    if (!tab) {
+      continue;
+    }
+    key = g_strndup(entry, (gsize)(tab - entry));
+    value = g_strdup(tab + 1);
+    gtk_grid_attach(GTK_GRID(grid), frontmatter_cell(key, FALSE), 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), frontmatter_cell(value, FALSE), 1, row, 1,
+                    1);
+    g_free(key);
+    g_free(value);
+  }
+
+  return wrapper;
+}
+
 void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
   RenderCtx ctx;
   MD_PARSER parser = {0};
@@ -1526,7 +1787,6 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
   ctx.render_state = reset_render_state(buffer);
   gtk_text_buffer_set_text(buffer, "", -1);
   input = source ? source : "";
-  normalized_source = g_strdup(input);
 
   ctx.buffer = buffer;
   ctx.active_tags = g_ptr_array_new();
@@ -1540,7 +1800,19 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
   ctx.heading_start_offset = 0;
   ctx.has_output = FALSE;
   ctx.trailing_newlines = 0;
-  gtk_text_buffer_get_start_iter(buffer, &ctx.iter);
+
+  {
+    GPtrArray *frontmatter;
+    const gchar *body = NULL;
+
+    frontmatter = parse_frontmatter(input, &body);
+    normalized_source = g_strdup(body);
+
+    gtk_text_buffer_get_start_iter(buffer, &ctx.iter);
+    if (frontmatter) {
+      insert_frontmatter(&ctx, frontmatter);
+    }
+  }
 
   parser.abi_version = 0;
   parser.flags = MD_DIALECT_GITHUB | MD_FLAG_PERMISSIVEATXHEADERS;

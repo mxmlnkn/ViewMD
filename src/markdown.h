@@ -37,6 +37,11 @@ void markdown_update_accent_tags(GtkTextBuffer *buffer);
 #define VIEWMD_IMAGE_ALT_DATA "viewmd-image-alt"
 #define VIEWMD_IMAGE_WIDGET_DATA "viewmd-image-widget"
 
+/* GObject data key for YAML frontmatter anchors holding key/value pairs. */
+#define VIEWMD_FRONTMATTER_DATA "viewmd-frontmatter"
+/* GObject data key set on frontmatter anchors once the widget has been built. */
+#define VIEWMD_FRONTMATTER_WIDGET_DATA "viewmd-frontmatter-widget"
+
 typedef struct {
   gint row;
   gint col;
@@ -61,5 +66,8 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source);
 
 /* Build a GTK widget for a table anchor, or NULL if not a table anchor. */
 GtkWidget *markdown_create_table_widget(GtkTextChildAnchor *anchor);
+
+/* Build a GTK widget for a YAML frontmatter anchor, or NULL. */
+GtkWidget *markdown_create_frontmatter_widget(GtkTextChildAnchor *anchor);
 
 #endif /* MARKYD_MARKDOWN_H */
