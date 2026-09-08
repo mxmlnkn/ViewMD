@@ -71,6 +71,7 @@ static void on_tab_close_clicked(GtkButton *button, gpointer user_data);
 static gboolean update_tab_label(MarkydWindow *self, MarkydTab *tab);
 static gboolean load_document_into_tab(MarkydWindow *self, MarkydTab *tab,
                                        const gchar *path);
+static void activate_tab_at_index(MarkydWindow *self, gint index);
 static void update_toc(MarkydWindow *self);
 static void on_editor_rendered(MarkydEditor *editor);
 static void on_toc_toggle_clicked(GtkButton *button, gpointer user_data);
@@ -893,80 +894,136 @@ static void on_toc_toggle_clicked(GtkButton *button, gpointer user_data) {
   }
 }
 
+static void activate_tab_at_index(MarkydWindow *self, gint index) {
+  MarkydTab *tab;
+
+  if (!self || index < 0 || index >= (gint)self->tabs->len) {
+    return;
+  }
+  tab = g_ptr_array_index(self->tabs, index);
+  gtk_notebook_set_current_page(GTK_NOTEBOOK(self->notebook), index);
+  self->active_index = index;
+  self->editor = tab->editor;
+}
+
 static void on_toc_row_activated(GtkListBox *list, GtkListBoxRow *row,
                                  gpointer user_data) {
   MarkydWindow *self = (MarkydWindow *)user_data;
-  MarkydTab *tab;
+  MarkydEditor *editor;
   const gchar *slug;
+  gchar *slug_copy;
 
   (void)list;
   if (!self) {
     return;
   }
+  editor = g_object_get_data(G_OBJECT(row), "viewmd-toc-editor");
   slug = g_object_get_data(G_OBJECT(row), "viewmd-toc-slug");
-  if (!slug) {
+  if (!editor) {
     return;
   }
+  /* Activating the tab can rebuild the ToC and destroy this row. */
+  slug_copy = g_strdup(slug);
 
-  tab = markyd_window_get_active_tab(self);
-  if (tab && tab->editor) {
-    markyd_editor_scroll_to_anchor(tab->editor, slug[0] != '\0' ? slug : NULL);
-    markyd_editor_focus(tab->editor);
+  for (guint i = 0; i < self->tabs->len; i++) {
+    MarkydTab *tab = g_ptr_array_index(self->tabs, i);
+    if (tab && tab->editor == editor) {
+      activate_tab_at_index(self, (gint)i);
+      break;
+    }
   }
+
+  if (slug_copy && slug_copy[0] != '\0') {
+    markyd_editor_scroll_to_anchor(editor, slug_copy);
+  }
+  markyd_editor_focus(editor);
+  g_free(slug_copy);
 }
 
 static void update_toc(MarkydWindow *self) {
-  MarkydTab *tab;
-  const GPtrArray *headings;
+  MarkydTab *active;
+  GtkListBoxRow *row;
 
   if (!self || !self->toc_list) {
     return;
   }
 
-  tab = markyd_window_get_active_tab(self);
-  headings = tab ? markyd_editor_get_headings(tab->editor) : NULL;
-
   /* Clear existing rows. */
-  {
-    GtkListBoxRow *row;
-    while ((row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(self->toc_list),
-                                                0))) {
-      gtk_widget_destroy(GTK_WIDGET(row));
+  while ((row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(self->toc_list),
+                                              0))) {
+    gtk_widget_destroy(GTK_WIDGET(row));
+  }
+
+  active = markyd_window_get_active_tab(self);
+
+  for (guint t = 0; t < self->tabs->len; t++) {
+    MarkydTab *tab = g_ptr_array_index(self->tabs, t);
+    const GPtrArray *headings;
+    const gchar *base;
+    GtkWidget *tab_row;
+    GtkWidget *tab_label;
+
+    if (!tab || !tab->editor) {
+      continue;
     }
-  }
+    headings = markyd_editor_get_headings(tab->editor);
+    if (tab->editor->file_path) {
+      base = g_path_get_basename(tab->editor->file_path);
+    } else {
+      base = g_strdup("Untitled");
+    }
 
-  if (!headings) {
-    return;
-  }
+    tab_row = gtk_list_box_row_new();
+    tab_label = gtk_label_new(base);
+    g_free((gchar *)base);
+    gtk_widget_set_halign(tab_label, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(tab_label, 4);
+    gtk_widget_set_margin_top(tab_label, 3);
+    gtk_widget_set_margin_bottom(tab_label, 3);
+    PangoAttrList *attrs = pango_attr_list_new();
+    pango_attr_list_insert(attrs, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    gtk_label_set_attributes(GTK_LABEL(tab_label), attrs);
+    pango_attr_list_unref(attrs);
+    gtk_container_add(GTK_CONTAINER(tab_row), tab_label);
+    g_object_set_data(G_OBJECT(tab_row), "viewmd-toc-editor", tab->editor);
+    gtk_list_box_insert(GTK_LIST_BOX(self->toc_list), tab_row, -1);
 
-  for (guint i = 0; i < headings->len; i++) {
-    ViewmdHeading *h = g_ptr_array_index(headings, i);
-    GtkWidget *row = gtk_list_box_row_new();
-    GtkWidget *label = gtk_label_new(h->text);
+    if (tab == active) {
+      gtk_style_context_add_class(
+          gtk_widget_get_style_context(tab_row), "viewmd-toc-tab-active");
+    }
+    gtk_widget_show_all(tab_row);
 
-    gtk_widget_set_halign(label, GTK_ALIGN_START);
-    gtk_widget_set_margin_start(label, 8 + 14 * (h->level - 1));
-    gtk_widget_set_margin_top(label, 2);
-    gtk_widget_set_margin_bottom(label, 2);
-    g_object_set_data_full(G_OBJECT(row), "viewmd-toc-slug", g_strdup(h->slug),
-                           g_free);
-    gtk_container_add(GTK_CONTAINER(row), label);
-    gtk_list_box_insert(GTK_LIST_BOX(self->toc_list), row, -1);
-    gtk_widget_show_all(row);
+    if (!headings) {
+      continue;
+    }
+    for (guint i = 0; i < headings->len; i++) {
+      ViewmdHeading *h = g_ptr_array_index(headings, i);
+      GtkWidget *row = gtk_list_box_row_new();
+      GtkWidget *label = gtk_label_new(h->text);
+
+      gtk_widget_set_halign(label, GTK_ALIGN_START);
+      gtk_widget_set_margin_start(label, 18 + 14 * (h->level - 1));
+      gtk_widget_set_margin_top(label, 2);
+      gtk_widget_set_margin_bottom(label, 2);
+      g_object_set_data_full(G_OBJECT(row), "viewmd-toc-slug",
+                             g_strdup(h->slug), g_free);
+      g_object_set_data(G_OBJECT(row), "viewmd-toc-editor", tab->editor);
+      gtk_container_add(GTK_CONTAINER(row), label);
+      gtk_list_box_insert(GTK_LIST_BOX(self->toc_list), row, -1);
+      gtk_widget_show_all(row);
+    }
   }
 }
 
 static void on_editor_rendered(MarkydEditor *editor) {
   MarkydWindow *self;
-  MarkydTab *tab;
 
   if (!editor || !editor->app || !editor->app->window) {
     return;
   }
   self = editor->app->window;
-  tab = markyd_window_get_active_tab(self);
-  if (tab && tab->editor == editor && self->toc_scroll &&
-      gtk_widget_get_visible(self->toc_scroll)) {
+  if (self->toc_scroll && gtk_widget_get_visible(self->toc_scroll)) {
     update_toc(self);
   }
 }
@@ -1224,6 +1281,7 @@ void markyd_window_close_tab(MarkydWindow *self, MarkydTab *tab) {
       self->editor = now->editor;
     }
   }
+  update_toc(self);
 }
 
 MarkydTab *markyd_window_get_active_tab(MarkydWindow *self) {
@@ -1526,6 +1584,7 @@ void markyd_window_apply_css(MarkydWindow *self) {
         ".viewmd-toc row { background-color: %s; border: none; }"
         ".viewmd-toc row:hover { background-color: %s; }"
         ".viewmd-toc row:selected { background-color: %s; color: %s; }"
+        ".viewmd-toc row.viewmd-toc-tab-active { background-color: %s; }"
         ".viewmd-code-block scrolledwindow { background-color: %s; }"
         /* Tab close button: Adwaita's hover pill is nearly invisible on the
            tab background, so paint a contrasting one. */
@@ -1536,7 +1595,7 @@ void markyd_window_apply_css(MarkydWindow *self) {
         "notebook header tab button:hover { background-color: alpha(%s, 0.28); "
         "  color: %s; }"
         "notebook header tab button:active { background-color: alpha(%s, 0.5); }",
-        bg, fg, bg, code_bg, sel_bg, fg, code_bg, fg, fg, fg, fg);
+        bg, fg, bg, code_bg, sel_bg, fg, code_bg, code_bg, fg, fg, fg, fg);
     gtk_css_provider_load_from_data(css_extra, css_extra_str, -1, NULL);
     g_free(css_extra_str);
     gtk_style_context_add_provider_for_screen(
