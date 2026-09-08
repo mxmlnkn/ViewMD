@@ -1,6 +1,9 @@
 #include "editor.h"
 #include "app.h"
 #include "markdown.h"
+#include "window.h"
+#include "config.h"
+#include <gio/gio.h>
 #include <math.h>
 #include <string.h>
 
@@ -176,6 +179,13 @@ static void apply_markdown(MarkydEditor *self) {
                       self->source_content ? self->source_content : "",
                       self->collapsed, self->headings);
   render_image_widgets(self);
+  /* The image permission prompt runs a nested loop; the window may have been
+     closed while it was open. */
+  if (!self->buffer || !self->text_view) {
+    self->scroll_anchor_frozen = FALSE;
+    self->updating_tags = FALSE;
+    return;
+  }
   render_table_widgets(self);
   render_frontmatter_widgets(self);
   render_code_block_widgets(self);
@@ -309,6 +319,286 @@ static void refresh_image_widget_scales(MarkydEditor *self) {
   }
 }
 
+static GtkWidget *make_image_widget_with_pixbuf(GdkPixbuf *orig,
+                                                gint max_width) {
+  GtkWidget *event_box;
+  GtkWidget *image;
+
+  event_box = gtk_event_box_new();
+  image = gtk_image_new();
+  gtk_event_box_set_visible_window(GTK_EVENT_BOX(event_box), FALSE);
+  gtk_widget_set_halign(event_box, GTK_ALIGN_START);
+  gtk_container_add(GTK_CONTAINER(event_box), image);
+  g_object_set_data(G_OBJECT(event_box), "viewmd-image-widget-child", image);
+  g_object_set_data_full(G_OBJECT(event_box), "viewmd-image-orig-pixbuf", orig,
+                         g_object_unref);
+  scale_image_widget(event_box, max_width);
+  return event_box;
+}
+
+/* ------------------------------------------------------------------ */
+/* Remote (http/https) image support: session cache, per-doc permission,
+   and asynchronous fetching on a worker thread. Fetching is opt-in:
+   remote_images is "ask" (default), "always", or "never", and the ask
+   prompt is shown once per document, Thunderbird-style. */
+
+static GHashTable *remote_pixbuf_cache; /* url -> GdkPixbuf* (ref held) */
+static GHashTable *remote_inflight;     /* url -> gpointer */
+
+static gboolean is_remote_src(const gchar *src) {
+  return g_str_has_prefix(src, "https://");
+}
+
+static GdkPixbuf *remote_cache_lookup(const gchar *url) {
+  if (!remote_pixbuf_cache) {
+    return NULL;
+  }
+  return g_hash_table_lookup(remote_pixbuf_cache, url);
+}
+
+static void remote_cache_store(const gchar *url, GdkPixbuf *pixbuf) {
+  if (!remote_pixbuf_cache) {
+    remote_pixbuf_cache =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
+  }
+  g_hash_table_replace(remote_pixbuf_cache, g_strdup(url), pixbuf);
+}
+
+static gboolean remote_permission_allowed(MarkydEditor *self) {
+  if (g_strcmp0(config->remote_images, "always") == 0) {
+    return TRUE;
+  }
+  if (g_strcmp0(config->remote_images, "never") == 0) {
+    return FALSE;
+  }
+  /* Do not open a modal prompt while the window is being destroyed. */
+  if (!self->app || !self->app->window || !self->app->window->window) {
+    return FALSE;
+  }
+
+  if (!self->remote_images_decided) {
+    GtkWidget *dialog;
+    gint response;
+
+    self->remote_images_decided = TRUE;
+    self->remote_images_allowed = FALSE;
+
+    dialog = gtk_message_dialog_new(
+        self->app && self->app->window ? GTK_WINDOW(self->app->window->window)
+                                       : NULL,
+        GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_QUESTION,
+        GTK_BUTTONS_YES_NO,
+        "This document references remote images.\nLoad them from the web?");
+    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dialog),
+                                             "%s",
+                                             self->file_path
+                                                 ? self->file_path
+                                                 : "(untitled)");
+    g_object_add_weak_pointer(G_OBJECT(dialog), (gpointer *)&dialog);
+    response = gtk_dialog_run(GTK_DIALOG(dialog));
+    if (dialog) {
+      g_object_remove_weak_pointer(G_OBJECT(dialog), (gpointer *)&dialog);
+      gtk_widget_destroy(dialog);
+      dialog = NULL;
+    }
+    self->remote_images_allowed = (response == GTK_RESPONSE_YES);
+  }
+  return self->remote_images_allowed;
+}
+
+typedef struct {
+  gchar *url;
+  guchar *bytes;
+  gsize length;
+} RemoteResult;
+
+static gboolean http_fetch(const gchar *url, guchar **out, gsize *out_len) {
+  GSocketClient *client;
+  GSocketConnectable *addr;
+  GSocketConnection *conn = NULL;
+  GOutputStream *output;
+  GInputStream *input;
+  GString *all;
+  const gchar *hr;
+  const gchar *body;
+  gsize body_len;
+  gchar *host = NULL;
+  gchar *path = NULL;
+  gint port;
+  gchar *request;
+  GError *error = NULL;
+  gboolean ok = FALSE;
+  gboolean https;
+
+  https = g_str_has_prefix(url, "https://");
+  port = https ? 443 : 80;
+
+  {
+    const gchar *p = strstr(url, "://");
+    if (!p) {
+      return FALSE;
+    }
+    p += 3;
+    const gchar *path_start = strchr(p, '/');
+    const gchar *colon = strchr(p, ':');
+    const gchar *end = NULL;
+    if (colon && (!path_start || colon < path_start)) {
+      end = colon;
+      port = atoi(colon + 1);
+    } else if (path_start) {
+      end = path_start;
+    }
+    host = g_strndup(p, end ? (gsize)(end - p) : strlen(p));
+    path = path_start ? g_strdup(path_start) : g_strdup("/");
+  }
+
+  client = g_socket_client_new();
+  g_socket_client_set_timeout(client, 15);
+  if (https) {
+    g_socket_client_set_tls(client, TRUE);
+  }
+  addr = g_network_address_new(host, port);
+  conn = g_socket_client_connect(client, addr, NULL, &error);
+  g_object_unref(addr);
+  if (!conn) {
+    g_clear_error(&error);
+    goto out;
+  }
+
+  request = g_strdup_printf(
+      "GET %s HTTP/1.1\r\n"
+      "Host: %s\r\n"
+      "User-Agent: ViewMD/1.0\r\n"
+      "Accept: image/*\r\n"
+      "Connection: close\r\n\r\n",
+      path, host);
+  output = g_io_stream_get_output_stream(G_IO_STREAM(conn));
+  input = g_io_stream_get_input_stream(G_IO_STREAM(conn));
+  if (!g_output_stream_write_all(output, request, strlen(request), NULL, NULL,
+                                 &error)) {
+    g_clear_error(&error);
+    g_free(request);
+    goto out;
+  }
+  g_free(request);
+
+  all = g_string_new(NULL);
+  {
+    guchar buf[8192];
+    gssize n;
+    while ((n = g_input_stream_read(input, buf, sizeof buf, NULL, &error)) >
+           0) {
+      if (all->len + (gsize)n > 16u * 1024u * 1024u) {
+        error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_NO_SPACE,
+                                    "remote image is too large");
+        break;
+      }
+      g_string_append_len(all, (gchar *)buf, (gsize)n);
+    }
+  }
+  if (error) {
+    g_clear_error(&error);
+    g_string_free(all, TRUE);
+    goto out;
+  }
+
+  hr = strstr(all->str, "\r\n\r\n");
+  body = hr ? hr + 4 : all->str;
+  body_len = all->len - (hr ? (gsize)(hr + 4 - all->str) : 0);
+  if (body_len > 0) {
+    *out = g_memdup2(body, body_len);
+    *out_len = body_len;
+    ok = TRUE;
+  }
+  g_string_free(all, TRUE);
+  g_object_unref(client);
+  client = NULL;
+
+out:
+  if (conn) {
+    g_object_unref(conn);
+  }
+  if (client) {
+    g_object_unref(client);
+  }
+  g_free(host);
+  g_free(path);
+  return ok;
+}
+
+static gboolean on_remote_fetched(gpointer data);
+
+static gpointer remote_fetch_thread(gpointer data) {
+  RemoteResult *result = data;
+  result->bytes = NULL;
+  result->length = 0;
+  http_fetch(result->url, &result->bytes, &result->length);
+  g_idle_add(on_remote_fetched, result);
+  return NULL;
+}
+
+static gboolean on_remote_fetched(gpointer data) {
+  RemoteResult *result = data;
+  GdkPixbufLoader *loader;
+  GdkPixbuf *pixbuf = NULL;
+
+  if (remote_inflight) {
+    g_hash_table_remove(remote_inflight, result->url);
+  }
+
+  if (result->bytes && result->length > 0) {
+    loader = gdk_pixbuf_loader_new();
+    if (gdk_pixbuf_loader_write(loader, result->bytes, result->length, NULL) &&
+        gdk_pixbuf_loader_close(loader, NULL)) {
+      pixbuf = gdk_pixbuf_loader_get_pixbuf(loader);
+      if (pixbuf) {
+        g_object_ref(pixbuf);
+        remote_cache_store(result->url, pixbuf);
+      }
+    }
+    if (loader) {
+      g_object_unref(loader);
+    }
+  }
+
+  /* Re-render any open document that references this URL. */
+  if (pixbuf && app && app->window && app->window->tabs) {
+    for (guint i = 0; i < app->window->tabs->len; i++) {
+      MarkydTab *tab = g_ptr_array_index(app->window->tabs, i);
+      if (tab && tab->editor && tab->editor->source_content &&
+          g_strstr_len(tab->editor->source_content, -1, result->url)) {
+        markyd_editor_refresh(tab->editor);
+      }
+    }
+  }
+
+  g_free(result->url);
+  g_free(result->bytes);
+  g_free(result);
+  return G_SOURCE_REMOVE;
+}
+
+static void ensure_remote_fetch(MarkydEditor *self, const gchar *url) {
+  RemoteResult *result;
+  GThread *thread;
+
+  if (!remote_inflight) {
+    remote_inflight = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+  }
+  if (g_hash_table_contains(remote_inflight, url)) {
+    return;
+  }
+  if (!remote_permission_allowed(self)) {
+    return;
+  }
+  g_hash_table_add(remote_inflight, g_strdup(url));
+
+  result = g_new0(RemoteResult, 1);
+  result->url = g_strdup(url);
+  thread = g_thread_new("viewmd-image", remote_fetch_thread, result);
+  g_thread_unref(thread);
+}
+
 static void render_image_widgets(MarkydEditor *self) {
   GtkTextIter iter;
   GtkTextIter end;
@@ -333,21 +623,32 @@ static void render_image_widgets(MarkydEditor *self) {
             g_object_get_data(G_OBJECT(anchor), VIEWMD_IMAGE_ALT_DATA);
         gchar *path = NULL;
 
-        if (resolve_image_source_path(self, src, &path)) {
+        if (is_remote_src(src)) {
+          GdkPixbuf *cached = remote_cache_lookup(src);
+          if (cached) {
+            image_widget = make_image_widget_with_pixbuf(
+                g_object_ref(cached), max_width);
+          } else {
+            /* Show the alt text; it will be replaced when the fetch lands. */
+            GtkWidget *fallback =
+                gtk_label_new(alt && alt[0] != '\0' ? alt : src);
+            gtk_widget_set_halign(fallback, GTK_ALIGN_START);
+            gtk_style_context_add_class(
+                gtk_widget_get_style_context(fallback), "dim-label");
+            image_widget = fallback;
+            ensure_remote_fetch(self, src);
+            /* ensure_remote_fetch() may run the permission dialog in a
+               nested loop; the window can be closed while it is open. */
+            if (!self->text_view || !self->buffer) {
+              g_free(path);
+              return;
+            }
+          }
+        } else if (resolve_image_source_path(self, src, &path)) {
           GError *err = NULL;
           GdkPixbuf *orig = gdk_pixbuf_new_from_file(path, &err);
           if (orig) {
-            GtkWidget *event_box = gtk_event_box_new();
-            GtkWidget *image = gtk_image_new();
-            gtk_event_box_set_visible_window(GTK_EVENT_BOX(event_box), FALSE);
-            gtk_widget_set_halign(event_box, GTK_ALIGN_START);
-            gtk_container_add(GTK_CONTAINER(event_box), image);
-            g_object_set_data(G_OBJECT(event_box), "viewmd-image-widget-child",
-                              image);
-            g_object_set_data_full(G_OBJECT(event_box), "viewmd-image-orig-pixbuf",
-                                   orig, g_object_unref);
-            scale_image_widget(event_box, max_width);
-            image_widget = event_box;
+            image_widget = make_image_widget_with_pixbuf(orig, max_width);
           } else if (err) {
             g_error_free(err);
           }

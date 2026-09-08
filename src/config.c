@@ -45,6 +45,7 @@ void config_apply_theme_colors(MarkydConfig *cfg) {
   cfg->list_bullet_color =
       g_strdup(theme_default_str(theme, "#e6edf3", "#1f2328"));
 
+
   (void)light;
 }
 
@@ -64,6 +65,7 @@ MarkydConfig *config_new(void) {
   cfg->theme = g_strdup("dark");
 
   config_apply_theme_colors(cfg);
+  cfg->remote_images = g_strdup("ask");
 
   cfg->line_numbers = FALSE;
   cfg->word_wrap = TRUE;
@@ -87,6 +89,7 @@ void config_free(MarkydConfig *cfg) {
   g_free(cfg->h2_color);
   g_free(cfg->h3_color);
   g_free(cfg->list_bullet_color);
+  g_free(cfg->remote_images);
   g_free(cfg);
 }
 
@@ -209,6 +212,12 @@ gboolean config_load(MarkydConfig *cfg) {
         keyfile, "Markdown", "list_bullet_color", NULL);
   }
 
+  if (g_key_file_has_key(keyfile, "Appearance", "remote_images", NULL)) {
+    g_free(cfg->remote_images);
+    cfg->remote_images =
+        g_key_file_get_string(keyfile, "Appearance", "remote_images", NULL);
+  }
+
   /* Editor */
   if (g_key_file_has_key(keyfile, "Editor", "word_wrap", NULL))
     cfg->word_wrap =
@@ -261,6 +270,8 @@ gboolean config_save(MarkydConfig *cfg) {
   g_key_file_set_string(keyfile, "Markdown", "h3_color", cfg->h3_color);
   g_key_file_set_string(keyfile, "Markdown", "list_bullet_color",
                         cfg->list_bullet_color);
+  g_key_file_set_string(keyfile, "Appearance", "remote_images",
+                        cfg->remote_images);
 
   /* Editor */
   g_key_file_set_boolean(keyfile, "Editor", "word_wrap", cfg->word_wrap);

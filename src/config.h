@@ -36,6 +36,9 @@ typedef struct _MarkydConfig {
   gchar *h3_color;
   gchar *list_bullet_color;
 
+  /* Remote image loading policy: "ask", "always", "never". */
+  gchar *remote_images;
+
   /* Editor */
   gboolean line_numbers;
   gboolean word_wrap;
