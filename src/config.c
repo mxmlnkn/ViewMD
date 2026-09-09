@@ -80,6 +80,7 @@ MarkydConfig *config_new(void) {
   cfg->word_wrap = TRUE;
   cfg->always_show_scrollbars = TRUE;
   cfg->inline_code_background_enabled = FALSE;
+  cfg->custom_window_styling = TRUE;
 
   return cfg;
 }
@@ -231,6 +232,9 @@ gboolean config_load(MarkydConfig *cfg) {
     cfg->remote_images =
         g_key_file_get_string(keyfile, "Appearance", "remote_images", NULL);
   }
+  if (g_key_file_has_key(keyfile, "Appearance", "custom_window_styling", NULL))
+    cfg->custom_window_styling = g_key_file_get_boolean(
+        keyfile, "Appearance", "custom_window_styling", NULL);
 
   if (g_key_file_has_key(keyfile, "Table", "border_color", NULL)) {
     g_free(cfg->table_border_color);
@@ -287,6 +291,8 @@ gboolean config_save(MarkydConfig *cfg) {
                         cfg->code_font_family);
   g_key_file_set_integer(keyfile, "Appearance", "font_size", cfg->font_size);
   g_key_file_set_string(keyfile, "Appearance", "theme", cfg->theme);
+  g_key_file_set_boolean(keyfile, "Appearance", "custom_window_styling",
+                         cfg->custom_window_styling);
 
   g_key_file_set_string(keyfile, "Table", "border_color",
                         cfg->table_border_color);

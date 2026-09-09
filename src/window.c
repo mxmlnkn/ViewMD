@@ -1362,6 +1362,7 @@ gboolean markyd_window_open_document(MarkydWindow *self, const gchar *path) {
 
 void markyd_window_apply_css(MarkydWindow *self) {
   static GtkCssProvider *css = NULL;
+  static GtkCssProvider *css_chrome = NULL;
   gchar *css_str;
   const gchar *bg;
   const gchar *fg;
@@ -1450,51 +1451,6 @@ void markyd_window_apply_css(MarkydWindow *self) {
       "  background-color: %s;"
       "  border: none;"
       "}"
-      "window {"
-      "  background-color: %s;"
-      "}"
-      "headerbar {"
-      "  background-color: %s;"
-      "  background-image: none;"
-      "  color: %s;"
-      "  border-bottom: 1px solid alpha(%s, 0.2);"
-      "}"
-      "headerbar label {"
-      "  color: %s;"
-      "}"
-      "headerbar button {"
-      "  background-image: none;"
-      "  color: %s;"
-      "  border-color: alpha(%s, 0.3);"
-      "}"
-      "notebook {"
-      "  background-color: %s;"
-      "  background-image: none;"
-      "}"
-      "notebook header {"
-      "  background-color: %s;"
-      "  background-image: none;"
-      "  border-bottom: 1px solid alpha(%s, 0.2);"
-      "}"
-      "notebook header tab {"
-      "  background-color: %s;"
-      "  background-image: none;"
-      "  color: %s;"
-      "  padding: 4px 12px 4px 12px;"
-      "  border: 1px solid alpha(%s, 0.15);"
-      "  border-radius: 4px 4px 0 0;"
-      "  margin-right: 1px;"
-      "}"
-      "notebook header tab:checked {"
-      "  background-color: %s;"
-      "  color: %s;"
-      "  border-color: alpha(%s, 0.3);"
-      "}"
-      "notebook header tab button {"
-      "  background-image: none;"
-      "  color: %s;"
-      "  border: none;"
-      "}"
       ".viewmd-table-cell {"
       "  background-color: %s;"
       "  border-style: solid;"
@@ -1565,7 +1521,6 @@ void markyd_window_apply_css(MarkydWindow *self) {
       "  font-weight: bold;"
       "}",
       config->font_family, config->font_size, bg, fg, fg, bg, fg, fg, sel_bg, bg,
-      bg, bg, fg, fg, fg, fg, fg, bg, bg, fg, bg, fg, fg, code_bg, fg, fg, fg,
       table_bg, table_border, table_fg, table_bg, table_fg, search_match_bg,
       search_match_fg, search_current_bg, search_current_fg, code_bg, code_bg,
       code_fg, code_fg, code_bg, code_fg, config->code_font_family,
@@ -1599,9 +1554,44 @@ void markyd_window_apply_css(MarkydWindow *self) {
         ".viewmd-code-block scrolledwindow { background-color: %s; }"
         ".viewmd-table-cell.viewmd-table-row-even { background-color: %s; }"
         ".viewmd-table-cell.viewmd-table-row-odd { background-color: %s; }"
-        ".viewmd-table-cell.viewmd-table-header-cell { background-color: %s; }"
-        /* Tab close button: Adwaita's hover pill is nearly invisible on the
-           tab background, so paint a contrasting one. */
+        ".viewmd-table-cell.viewmd-table-header-cell { background-color: %s; }",
+        bg, fg, bg, code_bg, sel_bg, fg, code_bg, code_bg, table_even, table_odd,
+        table_even);
+    gtk_css_provider_load_from_data(css_extra, css_extra_str, -1, NULL);
+    g_free(css_extra_str);
+    gtk_style_context_add_provider_for_screen(
+        gdk_screen_get_default(), GTK_STYLE_PROVIDER(css_extra),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  }
+
+  /* The rest of the window/headerbar/notebook chrome is only over-styled when
+     the preference is on; otherwise the system GTK theme draws those widgets. */
+  if (css_chrome) {
+    gtk_style_context_remove_provider_for_screen(gdk_screen_get_default(),
+                                                 GTK_STYLE_PROVIDER(css_chrome));
+    g_object_unref(css_chrome);
+    css_chrome = NULL;
+  }
+  if (config->custom_window_styling) {
+    gchar *chrome_str;
+
+    css_chrome = gtk_css_provider_new();
+    chrome_str = g_strdup_printf(
+        "window { background-color: %s; }"
+        "headerbar { background-color: %s; background-image: none; color: %s; "
+        "  border-bottom: 1px solid alpha(%s, 0.2); }"
+        "headerbar label { color: %s; }"
+        "headerbar button { background-image: none; color: %s; "
+        "  border-color: alpha(%s, 0.3); }"
+        "notebook { background-color: %s; background-image: none; }"
+        "notebook header { background-color: %s; background-image: none; "
+        "  border-bottom: 1px solid alpha(%s, 0.2); }"
+        "notebook header tab { background-color: %s; background-image: none; "
+        "  color: %s; padding: 4px 12px 4px 12px; "
+        "  border: 1px solid alpha(%s, 0.15); "
+        "  border-radius: 4px 4px 0 0; margin-right: 1px; }"
+        "notebook header tab:checked { background-color: %s; color: %s; "
+        "  border-color: alpha(%s, 0.3); }"
         "notebook header tab button { background-image: none; "
         "  background-color: transparent; border: none; border-radius: 4px; "
         "  padding: 1px; min-width: 20px; min-height: 20px; "
@@ -1609,13 +1599,13 @@ void markyd_window_apply_css(MarkydWindow *self) {
         "notebook header tab button:hover { background-color: alpha(%s, 0.28); "
         "  color: %s; }"
         "notebook header tab button:active { background-color: alpha(%s, 0.5); }",
-        bg, fg, bg, code_bg, sel_bg, fg, code_bg, code_bg, table_even, table_odd,
-        table_even, fg, fg, fg, fg);
-    gtk_css_provider_load_from_data(css_extra, css_extra_str, -1, NULL);
-    g_free(css_extra_str);
-    gtk_style_context_add_provider_for_screen(
-        gdk_screen_get_default(), GTK_STYLE_PROVIDER(css_extra),
-        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        bg, bg, fg, fg, fg, fg, fg, bg, bg, fg, bg, fg, fg, code_bg, fg, fg, fg,
+        fg, fg, fg);
+    gtk_css_provider_load_from_data(css_chrome, chrome_str, -1, NULL);
+    g_free(chrome_str);
+    gtk_style_context_add_provider_for_screen(gdk_screen_get_default(),
+                                              GTK_STYLE_PROVIDER(css_chrome),
+                                              GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
   }
 
   update_search_tag_styles(self, search_match_bg, search_match_fg,
@@ -2243,6 +2233,11 @@ static void on_inline_code_bg_toggled(GtkToggleButton *toggle, gpointer user_dat
   config->inline_code_background_enabled = gtk_toggle_button_get_active(toggle);
 }
 
+static void on_custom_styling_toggled(GtkToggleButton *toggle, gpointer user_data) {
+  (void)user_data;
+  config->custom_window_styling = gtk_toggle_button_get_active(toggle);
+}
+
 static GtkWidget *create_settings_dialog(MarkydWindow *win) {
   GtkWidget *dialog;
   GtkWidget *content;
@@ -2297,6 +2292,17 @@ static GtkWidget *create_settings_dialog(MarkydWindow *win) {
                    ui);
   gtk_widget_set_hexpand(ui->theme_combo, TRUE);
   gtk_grid_attach(GTK_GRID(grid), ui->theme_combo, 1, row++, 1, 1);
+
+  {
+    GtkWidget *window_style =
+        gtk_check_button_new_with_label("Use custom window styling");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(window_style),
+                                 config->custom_window_styling);
+    g_signal_connect(window_style, "toggled",
+                     G_CALLBACK(on_custom_styling_toggled), NULL);
+    gtk_widget_set_halign(window_style, GTK_ALIGN_START);
+    gtk_grid_attach(GTK_GRID(grid), window_style, 0, row++, 2, 1);
+  }
 
   label = gtk_label_new("Remote images:");
   gtk_widget_set_halign(label, GTK_ALIGN_END);
