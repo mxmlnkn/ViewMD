@@ -45,6 +45,9 @@ typedef struct _MarkydConfig {
   gchar *table_row_even_background;
   gchar *table_row_odd_background;
 
+  /* Appearance options */
+  gboolean custom_window_styling;
+
   /* Editor */
   gboolean line_numbers;
   gboolean word_wrap;
