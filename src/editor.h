@@ -27,6 +27,10 @@ typedef struct _MarkydEditor {
   /* Headings of the current document (ViewmdHeading*), newest render last. */
   GPtrArray *headings;
 
+  /* TRUE when this tab shows the raw markdown source instead of a render;
+     source_content then holds the text shown verbatim. */
+  gboolean source_view;
+
   /* Remote image loading decision for this document ("ask" mode). */
   gboolean remote_images_decided;
   gboolean remote_images_allowed;
@@ -90,6 +94,9 @@ void markyd_editor_free(MarkydEditor *editor);
 /* Content management */
 void markyd_editor_set_content(MarkydEditor *editor, const gchar *content);
 gchar *markyd_editor_get_content(MarkydEditor *editor);
+
+/* Show 'text' verbatim (raw markdown) instead of rendering it. */
+void markyd_editor_show_source(MarkydEditor *editor, const gchar *text);
 
 /* Document path handling (used for relative image/link resolution). */
 void markyd_editor_set_file_path(MarkydEditor *editor, const gchar *path);

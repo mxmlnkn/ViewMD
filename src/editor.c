@@ -13,6 +13,9 @@ static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event,
                                  gpointer user_data);
 static gboolean on_leave_notify(GtkWidget *widget, GdkEventCrossing *event,
                                 gpointer user_data);
+static void on_view_source_activate(GtkMenuItem *item, gpointer user_data);
+static void on_populate_popup(GtkTextView *text_view, GtkWidget *menu,
+                              gpointer user_data);
 static void on_text_view_destroyed(GtkWidget *widget, gpointer user_data);
 static void apply_markdown(MarkydEditor *self);
 static void schedule_markdown_apply(MarkydEditor *self);
@@ -158,6 +161,22 @@ static void apply_markdown(MarkydEditor *self) {
   gboolean preserve_scroll = FALSE;
 
   if (!self || !self->buffer || !self->text_view) {
+    return;
+  }
+
+  /* A source tab is not rendered: show the raw markdown verbatim. */
+  if (self->source_view) {
+    self->updating_tags = TRUE;
+    if (self->headings) {
+      g_ptr_array_set_size(self->headings, 0);
+    }
+    gtk_text_buffer_set_text(self->buffer,
+                             self->source_content ? self->source_content : "",
+                             -1);
+    self->updating_tags = FALSE;
+    if (self->on_rendered) {
+      self->on_rendered(self);
+    }
     return;
   }
 
@@ -991,6 +1010,7 @@ MarkydEditor *markyd_editor_new(MarkydApp *app) {
   self->collapsed = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                            NULL);
   self->headings = g_ptr_array_new_with_free_func(viewmd_heading_free);
+  self->source_view = FALSE;
   self->updating_tags = FALSE;
   self->markdown_idle_id = 0;
   self->relayout_timeout_id = 0;
@@ -1039,6 +1059,8 @@ MarkydEditor *markyd_editor_new(MarkydApp *app) {
                    G_CALLBACK(on_leave_notify), self);
   g_signal_connect(self->text_view, "destroy",
                    G_CALLBACK(on_text_view_destroyed), self);
+  g_signal_connect(self->text_view, "populate-popup",
+                   G_CALLBACK(on_populate_popup), self);
   /* 'before' runs ahead of the default handler (old layout intact), 'after'
      runs after the re-layout finished. */
   g_signal_connect(self->text_view, "size-allocate",
@@ -1380,6 +1402,18 @@ gchar *markyd_editor_get_content(MarkydEditor *self) {
   return g_strdup(self->source_content ? self->source_content : "");
 }
 
+void markyd_editor_show_source(MarkydEditor *self, const gchar *text) {
+  if (!self) {
+    return;
+  }
+  self->source_view = TRUE;
+  gtk_text_view_set_monospace(GTK_TEXT_VIEW(self->text_view), TRUE);
+  gtk_style_context_add_class(gtk_widget_get_style_context(self->text_view),
+                              "viewmd-source");
+  gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(self->text_view), GTK_WRAP_NONE);
+  markyd_editor_set_content(self, text);
+}
+
 void markyd_editor_set_file_path(MarkydEditor *self, const gchar *path) {
   if (!self) {
     return;
@@ -1556,4 +1590,42 @@ static gboolean on_leave_notify(GtkWidget *widget, GdkEventCrossing *event,
   (void)event;
   set_link_cursor(self, FALSE);
   return FALSE;
+}
+
+static void on_view_source_activate(GtkMenuItem *item, gpointer user_data) {
+  MarkydEditor *self = (MarkydEditor *)user_data;
+  MarkydWindow *window;
+  MarkydTab *tab;
+  gchar *source;
+
+  (void)item;
+  if (!self || !self->app || !self->app->window) {
+    return;
+  }
+  window = self->app->window;
+  source = markyd_editor_get_content(self);
+
+  tab = markyd_window_new_tab(window);
+  if (tab && tab->editor) {
+    if (self->file_path) {
+      markyd_editor_set_file_path(tab->editor, self->file_path);
+    }
+    markyd_editor_show_source(tab->editor, source);
+    markyd_window_update_tab_label(window, tab);
+  }
+  g_free(source);
+}
+
+static void on_populate_popup(GtkTextView *text_view, GtkWidget *menu,
+                              gpointer user_data) {
+  MarkydEditor *self = (MarkydEditor *)user_data;
+  GtkWidget *item;
+
+  (void)text_view;
+  item = gtk_menu_item_new_with_label("View Source");
+  gtk_widget_set_tooltip_text(item,
+                              "Show the raw markdown of this document");
+  g_signal_connect(item, "activate", G_CALLBACK(on_view_source_activate), self);
+  gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+  gtk_widget_show(item);
 }

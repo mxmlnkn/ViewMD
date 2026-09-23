@@ -55,6 +55,7 @@ void markyd_window_apply_css(MarkydWindow *win);
 MarkydTab *markyd_window_new_tab(MarkydWindow *win);
 void markyd_window_close_tab(MarkydWindow *win, MarkydTab *tab);
 MarkydTab *markyd_window_get_active_tab(MarkydWindow *win);
+void markyd_window_update_tab_label(MarkydWindow *win, MarkydTab *tab);
 void markyd_window_switch_tab(MarkydWindow *win, gint offset);
 gboolean markyd_window_has_document(MarkydWindow *win, MarkydTab *tab);
 
