@@ -12,6 +12,7 @@ A lightweight GTK 3 markdown viewer for desktop Linux. It is ideal as your defau
 - **Lightweight** - Pure C, no web technologies, fast startup
 - **Hyperlink support** - Left click opens links and internal anchors
 - **Document search** - `Ctrl+F` with next/previous match navigation
+- **Raw source access** - Right-click to view or copy the raw markdown
 - **Local image support** - Local images are resized to fit the the document window
 
 ## Supported Markdown
@@ -63,6 +64,12 @@ Run `viewmd` to start the application.
 - **Open button**: Open a markdown document
 - **Reload button**: Reload the currently open document from disk
 - **Settings button**: Adjust theme, fonts, and markdown accent colors
+
+### View or Copy the Raw Source
+
+Right-click anywhere in the document and choose **View Source** to open the
+raw markdown in a read-only monospace tab, or **Copy Source** to put the
+whole raw markdown on the clipboard.
 
 ### Find in Document
 

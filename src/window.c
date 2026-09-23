@@ -1221,10 +1221,20 @@ static gboolean update_tab_label(MarkydWindow *self, MarkydTab *tab) {
     g_list_free(children);
   }
   if (label) {
-    gtk_label_set_text(GTK_LABEL(label), base ? base : "Untitled");
+    if (tab->editor->source_view) {
+      gchar *title = g_strdup_printf("%s (source)", base ? base : "Untitled");
+      gtk_label_set_text(GTK_LABEL(label), title);
+      g_free(title);
+    } else {
+      gtk_label_set_text(GTK_LABEL(label), base ? base : "Untitled");
+    }
   }
   g_free(base);
   return TRUE;
+}
+
+void markyd_window_update_tab_label(MarkydWindow *self, MarkydTab *tab) {
+  update_tab_label(self, tab);
 }
 
 void markyd_window_close_tab(MarkydWindow *self, MarkydTab *tab) {
@@ -1315,7 +1325,15 @@ void markyd_window_switch_tab(MarkydWindow *self, gint offset) {
 
 gboolean markyd_window_has_document(MarkydWindow *self, MarkydTab *tab) {
   (void)self;
-  return tab && tab->editor->file_path && tab->editor->file_path[0] != '\0';
+  if (!tab || !tab->editor) {
+    return FALSE;
+  }
+  /* A source tab holds content even without a file path, so it must not be
+     reused as the empty placeholder tab. */
+  if (tab->editor->source_view) {
+    return TRUE;
+  }
+  return tab->editor->file_path && tab->editor->file_path[0] != '\0';
 }
 
 static gboolean load_document_into_tab(MarkydWindow *self, MarkydTab *tab,
@@ -1552,11 +1570,12 @@ void markyd_window_apply_css(MarkydWindow *self) {
         ".viewmd-toc row:selected { background-color: %s; color: %s; }"
         ".viewmd-toc row.viewmd-toc-tab-active { background-color: %s; }"
         ".viewmd-code-block scrolledwindow { background-color: %s; }"
+        ".viewmd-source { font-family: '%s', monospace; }"
         ".viewmd-table-cell.viewmd-table-row-even { background-color: %s; }"
         ".viewmd-table-cell.viewmd-table-row-odd { background-color: %s; }"
         ".viewmd-table-cell.viewmd-table-header-cell { background-color: %s; }",
-        bg, fg, bg, code_bg, sel_bg, fg, code_bg, code_bg, table_even, table_odd,
-        table_even);
+        bg, fg, bg, code_bg, sel_bg, fg, code_bg, code_bg,
+        config->code_font_family, table_even, table_odd, table_even);
     gtk_css_provider_load_from_data(css_extra, css_extra_str, -1, NULL);
     g_free(css_extra_str);
     gtk_style_context_add_provider_for_screen(
