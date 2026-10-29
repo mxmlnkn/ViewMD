@@ -54,6 +54,7 @@ static gboolean on_configure_event(GtkWidget *widget, GdkEventConfigure *event,
 static gboolean on_window_state_event(GtkWidget *widget,
                                       GdkEventWindowState *event,
                                       gpointer user_data);
+static void on_window_destroyed(GtkWidget *widget, gpointer user_data);
 
 static void on_font_size_changed(GtkSpinButton *spin, gpointer user_data);
 static void on_font_family_changed(GtkComboBoxText *combo, gpointer user_data);
@@ -633,6 +634,9 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
   self->app = app;
 
   self->window = gtk_application_window_new(app->gtk_app);
+  g_object_add_weak_pointer(G_OBJECT(self->window), (gpointer *)&self->window);
+  g_signal_connect(self->window, "destroy", G_CALLBACK(on_window_destroyed),
+                   self);
   gtk_window_set_title(GTK_WINDOW(self->window), "ViewMD");
 
   gtk_window_set_default_size(GTK_WINDOW(self->window), config->window_width,
@@ -891,6 +895,7 @@ void markyd_window_free(MarkydWindow *self) {
 
   if (self->window) {
     gtk_widget_destroy(self->window);
+    self->window = NULL;
   }
 
   g_free(self);
@@ -1119,6 +1124,14 @@ static gboolean on_configure_event(GtkWidget *widget, GdkEventConfigure *event,
   }
 
   return FALSE;
+}
+
+static void on_window_destroyed(GtkWidget *widget, gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+  (void)widget;
+  if (self) {
+    self->window = NULL;
+  }
 }
 
 static gboolean on_window_state_event(GtkWidget *widget,
