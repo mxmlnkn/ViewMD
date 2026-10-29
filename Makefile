@@ -17,9 +17,15 @@ bindir ?= $(PREFIX)/bin
 datadir ?= $(PREFIX)/share
 applicationsdir ?= $(datadir)/applications
 
-.PHONY: all clean install uninstall
+.PHONY: all clean install uninstall test
 
 all: $(TARGET)
+
+test: $(OBJDIR)/test-markdown
+	./$(OBJDIR)/test-markdown
+
+$(OBJDIR)/test-markdown: tests/test_markdown.c $(OBJDIR)/markdown.o $(OBJDIR)/code_highlight.o $(OBJDIR)/config.o $(OBJDIR)/md4c.o $(SRCDIR)/markdown.h $(SRCDIR)/config.h
+	$(CC) $(CFLAGS) -I$(SRCDIR) tests/test_markdown.c $(OBJDIR)/markdown.o $(OBJDIR)/code_highlight.o $(OBJDIR)/config.o $(OBJDIR)/md4c.o -o $@ $(LDFLAGS)
 
 $(TARGET): $(OBJECTS)
 	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)

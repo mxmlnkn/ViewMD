@@ -23,6 +23,12 @@
 #define TAG_TABLE_SEPARATOR "table_separator"
 #define TAG_INVISIBLE "invisible"
 #define TABLE_MODEL_DATA_KEY "viewmd-table-model"
+#define RENDER_STATE_DATA_KEY "viewmd-render-state"
+
+typedef struct {
+  GPtrArray *link_tags;    /* Owned GtkTextTag references. */
+  GPtrArray *anchor_marks; /* Owned GtkTextMark references. */
+} RenderState;
 
 typedef struct {
   gboolean ordered;
@@ -63,6 +69,7 @@ typedef struct {
 
 typedef struct {
   GtkTextBuffer *buffer;
+  RenderState *render_state;
   GtkTextIter iter;
   GPtrArray *active_tags; /* GtkTextTag* */
   GArray *block_stack;    /* BlockState */
@@ -88,6 +95,42 @@ typedef struct {
   gboolean has_output;
   guint trailing_newlines;
 } RenderCtx;
+
+static void render_state_free(gpointer data) {
+  RenderState *state = data;
+  g_ptr_array_free(state->link_tags, TRUE);
+  g_ptr_array_free(state->anchor_marks, TRUE);
+  g_free(state);
+}
+
+static RenderState *reset_render_state(GtkTextBuffer *buffer) {
+  RenderState *state = g_object_get_data(G_OBJECT(buffer), RENDER_STATE_DATA_KEY);
+
+  if (!state) {
+    state = g_new0(RenderState, 1);
+    state->link_tags = g_ptr_array_new_with_free_func(g_object_unref);
+    state->anchor_marks = g_ptr_array_new_with_free_func(g_object_unref);
+    g_object_set_data_full(G_OBJECT(buffer), RENDER_STATE_DATA_KEY, state,
+                          render_state_free);
+    return state;
+  }
+
+  /* Replacing text removes tag applications, but leaves tags and marks alive. */
+  GtkTextTagTable *table = gtk_text_buffer_get_tag_table(buffer);
+  for (guint i = 0; i < state->link_tags->len; i++) {
+    gtk_text_tag_table_remove(table, g_ptr_array_index(state->link_tags, i));
+  }
+  g_ptr_array_set_size(state->link_tags, 0);
+
+  for (guint i = 0; i < state->anchor_marks->len; i++) {
+    GtkTextMark *mark = g_ptr_array_index(state->anchor_marks, i);
+    if (!gtk_text_mark_get_deleted(mark)) {
+      gtk_text_buffer_delete_mark(buffer, mark);
+    }
+  }
+  g_ptr_array_set_size(state->anchor_marks, 0);
+  return state;
+}
 
 static void viewmd_table_row_free(gpointer data) {
   ViewmdTableRow *row = (ViewmdTableRow *)data;
@@ -362,10 +405,10 @@ static guint decimal_digits(guint value) {
   return digits;
 }
 
-static guint list_marker_columns(RenderCtx *ctx) {
+static guint list_marker_columns(RenderCtx *ctx, gboolean is_task) {
   ListState *list;
-  if (!ctx || !ctx->list_stack || ctx->list_stack->len == 0) {
-    return 2; /* "• " */
+  if (is_task || !ctx || !ctx->list_stack || ctx->list_stack->len == 0) {
+    return 2; /* A bullet or checkbox followed by a space. */
   }
   list = &g_array_index(ctx->list_stack, ListState, ctx->list_stack->len - 1);
   if (list->ordered) {
@@ -644,7 +687,10 @@ static void create_heading_anchor(RenderCtx *ctx) {
 
   mark_name = g_strdup_printf("%s%s", VIEWMD_ANCHOR_MARK_PREFIX, slug);
   gtk_text_buffer_get_iter_at_offset(ctx->buffer, &at, ctx->heading_start_offset);
-  gtk_text_buffer_create_mark(ctx->buffer, mark_name, &at, TRUE);
+  GtkTextMark *mark = gtk_text_buffer_create_mark(ctx->buffer, mark_name, &at, TRUE);
+  if (mark) {
+    g_ptr_array_add(ctx->render_state->anchor_marks, g_object_ref(mark));
+  }
 
   g_free(mark_name);
   g_free(slug);
@@ -917,7 +963,7 @@ static void image_emit_anchor(RenderCtx *ctx) {
   insert_cstr(ctx, "\n");
 }
 
-static void insert_list_marker(RenderCtx *ctx) {
+static void insert_list_marker(RenderCtx *ctx, const MD_BLOCK_LI_DETAIL *detail) {
   ListState *list;
   gchar *ordered = NULL;
   gint marker_start_offset;
@@ -930,8 +976,12 @@ static void insert_list_marker(RenderCtx *ctx) {
   list = &g_array_index(ctx->list_stack, ListState, ctx->list_stack->len - 1);
 
   marker_start_offset = gtk_text_iter_get_offset(&ctx->iter);
-  if (list->ordered) {
-    ordered = g_strdup_printf("%u.", list->next_index++);
+  if (detail && detail->is_task) {
+    insert_cstr(ctx, (detail->task_mark == 'x' || detail->task_mark == 'X')
+                         ? "\xE2\x98\x91" /* ☑ */
+                         : "\xE2\x98\x90"); /* ☐ */
+  } else if (list->ordered) {
+    ordered = g_strdup_printf("%u.", list->next_index);
     insert_cstr(ctx, ordered);
   } else {
     insert_cstr(ctx, "\xE2\x80\xA2");
@@ -941,6 +991,9 @@ static void insert_list_marker(RenderCtx *ctx) {
                             marker_end_offset);
 
   insert_cstr(ctx, " ");
+  if (list->ordered) {
+    list->next_index++;
+  }
   g_free(ordered);
 }
 
@@ -1018,7 +1071,8 @@ static int on_enter_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
 
   case MD_BLOCK_LI:
     {
-      guint marker_cols = list_marker_columns(ctx);
+      MD_BLOCK_LI_DETAIL *li = detail;
+      guint marker_cols = list_marker_columns(ctx, li && li->is_task);
       GtkTextTag *layout_tag = ensure_list_layout_tag(
           ctx, ctx->list_stack->len, ctx->quote_depth, marker_cols);
 
@@ -1027,7 +1081,7 @@ static int on_enter_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
                       &g_array_index(ctx->block_stack, BlockState,
                                      ctx->block_stack->len - 1)
                            .pushed_tags);
-      insert_list_marker(ctx);
+      insert_list_marker(ctx, li);
       ctx->list_item_prefix_pending = TRUE;
     }
     break;
@@ -1191,6 +1245,7 @@ static int on_enter_span(MD_SPANTYPE type, void *detail, void *userdata) {
     MD_SPAN_A_DETAIL *a = (MD_SPAN_A_DETAIL *)detail;
     gchar *href = attr_to_string(a ? &a->href : NULL);
     GtkTextTag *url_tag = gtk_text_buffer_create_tag(ctx->buffer, NULL, NULL);
+    g_ptr_array_add(ctx->render_state->link_tags, g_object_ref(url_tag));
     g_object_set_data_full(G_OBJECT(url_tag), VIEWMD_LINK_URL_DATA, href, g_free);
     push_active_tag_by_name(ctx, TAG_LINK,
                             &g_array_index(ctx->span_stack, SpanState,
@@ -1511,11 +1566,12 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
     return;
   }
 
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.render_state = reset_render_state(buffer);
   gtk_text_buffer_set_text(buffer, "", -1);
   input = source ? source : "";
   normalized_source = normalize_markdown_source(input);
 
-  memset(&ctx, 0, sizeof(ctx));
   ctx.buffer = buffer;
   ctx.active_tags = g_ptr_array_new();
   ctx.block_stack = g_array_new(FALSE, FALSE, sizeof(BlockState));
@@ -1543,6 +1599,7 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
   rc = md_parse(normalized_source, (MD_SIZE)strlen(normalized_source), &parser,
                 &ctx);
   if (rc != 0) {
+    reset_render_state(buffer);
     gtk_text_buffer_set_text(buffer, input, -1);
   } else {
     apply_code_highlighting(buffer, ctx.code_blocks);
