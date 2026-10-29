@@ -2,6 +2,8 @@
 #include "code_highlight.h"
 #include "config.h"
 #include "md4c/md4c.h"
+#include "html_entities.h"
+#include <stdlib.h>
 #include <string.h>
 
 /* Tag names */
@@ -476,11 +478,74 @@ static void pop_active_tags(RenderCtx *ctx, guint count) {
   }
 }
 
+static gint compare_entity_names(const void *key, const void *entry) {
+  return strcmp(key, ((const HtmlEntity *)entry)->name);
+}
+
+static gchar *decode_entity(const MD_CHAR *text, MD_SIZE size) {
+  gchar *entity = g_strndup(text, size);
+
+  /* md4c has already validated the reference syntax, including the semicolon
+   * and the number of digits. Decode only these parser-identified references. */
+  if (size > 2 && entity[1] == '#') {
+    const gchar *digits = entity + 2;
+    guint base = 10;
+    if (*digits == 'x' || *digits == 'X') {
+      digits++;
+      base = 16;
+    }
+    guint64 value = g_ascii_strtoull(digits, NULL, base);
+    if (value == 0 || value > 0x10FFFF ||
+        (value >= 0xD800 && value <= 0xDFFF)) {
+      value = 0xFFFD;
+    }
+    gchar utf8[7] = {0};
+    g_unichar_to_utf8((gunichar)value, utf8);
+    g_free(entity);
+    return g_strdup(utf8);
+  }
+
+  const HtmlEntity *match = bsearch(entity, html_entities,
+      G_N_ELEMENTS(html_entities), sizeof(html_entities[0]), compare_entity_names);
+  if (match) {
+    g_free(entity);
+    return g_strdup(match->utf8);
+  }
+  return entity; /* Unknown names remain literal, as required by CommonMark. */
+}
+
+static gchar *md_text_to_utf8(MD_TEXTTYPE type, const MD_CHAR *text,
+                              MD_SIZE size) {
+  if (type == MD_TEXT_NULLCHAR) {
+    GString *s = g_string_new(NULL);
+    for (MD_SIZE i = 0; i < size; i++) {
+      g_string_append(s, "\xEF\xBF\xBD");
+    }
+    return g_string_free(s, FALSE);
+  }
+
+  if (!text || size == 0) {
+    return g_strdup("");
+  }
+  if (type == MD_TEXT_ENTITY) {
+    return decode_entity(text, size);
+  }
+  return g_strndup(text, size);
+}
+
 static gchar *attr_to_string(const MD_ATTRIBUTE *attr) {
   if (!attr || !attr->text || attr->size == 0) {
     return g_strdup("");
   }
-  return g_strndup(attr->text, attr->size);
+  GString *result = g_string_new(NULL);
+  for (guint i = 0; attr->substr_offsets[i] < attr->size; i++) {
+    MD_OFFSET start = attr->substr_offsets[i];
+    MD_SIZE size = attr->substr_offsets[i + 1] - start;
+    gchar *part = md_text_to_utf8(attr->substr_types[i], attr->text + start, size);
+    g_string_append(result, part);
+    g_free(part);
+  }
+  return g_string_free(result, FALSE);
 }
 
 static gchar *extract_code_language_from_detail(MD_BLOCK_CODE_DETAIL *code) {
@@ -590,23 +655,6 @@ static void apply_code_highlighting(GtkTextBuffer *buffer, GArray *code_blocks) 
     CodeBlockRange *range = &g_array_index(code_blocks, CodeBlockRange, i);
     apply_code_highlighting_for_block(buffer, range);
   }
-}
-
-static gchar *md_text_to_utf8(MD_TEXTTYPE type, const MD_CHAR *text,
-                              MD_SIZE size) {
-  if (type == MD_TEXT_NULLCHAR) {
-    GString *s = g_string_new(NULL);
-    for (MD_SIZE i = 0; i < size; i++) {
-      g_string_append(s, "\xEF\xBF\xBD");
-    }
-    return g_string_free(s, FALSE);
-  }
-
-  if (!text || size == 0) {
-    return g_strdup("");
-  }
-
-  return g_strndup(text, size);
 }
 
 gchar *markdown_normalize_anchor_slug(const gchar *text) {

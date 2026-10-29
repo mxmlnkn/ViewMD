@@ -1,5 +1,6 @@
 #include "config.h"
 #include "markdown.h"
+#include <string.h>
 
 static GtkTextBuffer *new_buffer(void) {
   GtkTextBuffer *buffer = gtk_text_buffer_new(NULL);
@@ -147,6 +148,96 @@ static void test_task_hanging_indent(void) {
   g_object_unref(buffer);
 }
 
+static void test_entity_names(void) {
+  GtkTextBuffer *buffer = new_buffer();
+  markdown_apply_tags(buffer,
+      "&copy; &mdash; caf&eacute; A&nbsp;B &amp; &lt; &gt; &quot; &apos; "
+      "&NotEqualTilde; &Afr; &CounterClockwiseContourIntegral;");
+  assert_text(buffer, "© — café A\302\240B & < > \" ' ≂̸ 𝔄 ∳");
+  g_object_unref(buffer);
+}
+
+static void test_entity_numbers(void) {
+  GtkTextBuffer *buffer = new_buffer();
+  markdown_apply_tags(buffer, "&#169; &#x2014; &#X1F600; &#0; &#xD800; "
+                               "&#xDFFF; &#1114112; &#xFFFFFF;");
+  assert_text(buffer, "© — 😀 � � � � �");
+  g_object_unref(buffer);
+}
+
+static void test_entity_literals(void) {
+  GtkTextBuffer *buffer = new_buffer();
+  const gchar *text = "&MadeUpEntity; &COPYwrong; &copy &#; &#x; &#xGG; "
+                       "&#12345678; &#x1234567;";
+  markdown_apply_tags(buffer, text);
+  assert_text(buffer, text);
+  markdown_apply_tags(buffer, "&amp;copy; &#38;copy; \\&copy; &#42;literal&#42;");
+  assert_text(buffer, "&copy; &copy; &copy; *literal*");
+  GtkTextIter at;
+  gtk_text_buffer_get_iter_at_offset(buffer, &at, 23);
+  g_assert_false(gtk_text_iter_has_tag(&at, gtk_text_tag_table_lookup(
+      gtk_text_buffer_get_tag_table(buffer), "italic")));
+  g_object_unref(buffer);
+}
+
+static void test_entities_in_code(void) {
+  GtkTextBuffer *buffer = new_buffer();
+  markdown_apply_tags(buffer, "`&copy; &#169;`\n\n```\n&amp; &#x2014;\n```\n");
+  assert_text(buffer, "&copy; &#169;\n\n&amp; &#x2014;\n");
+  markdown_apply_tags(buffer, "    &copy; &#169;\n");
+  assert_text(buffer, "&copy; &#169;\n");
+  g_object_unref(buffer);
+}
+
+static void test_entity_attributes(void) {
+  GtkTextBuffer *buffer = new_buffer();
+  markdown_apply_tags(buffer, "[A &amp; B](https://example.com/?a=1&amp;b=2&#35;part)");
+  assert_text(buffer, "A & B");
+  GtkTextIter at;
+  gtk_text_buffer_get_start_iter(buffer, &at);
+  GSList *tags = gtk_text_iter_get_tags(&at);
+  gboolean found_url = FALSE;
+  for (GSList *item = tags; item; item = item->next) {
+    const gchar *url = g_object_get_data(G_OBJECT(item->data), VIEWMD_LINK_URL_DATA);
+    if (url) {
+      g_assert_cmpstr(url, ==, "https://example.com/?a=1&b=2#part");
+      found_url = TRUE;
+    }
+  }
+  g_assert_true(found_url);
+  g_slist_free(tags);
+
+  markdown_apply_tags(buffer, "![A &amp; B](images/a&amp;b.png)");
+  gtk_text_buffer_get_start_iter(buffer, &at);
+  GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(&at);
+  g_assert_nonnull(anchor);
+  g_assert_cmpstr(g_object_get_data(G_OBJECT(anchor), VIEWMD_IMAGE_SRC_DATA),
+                  ==, "images/a&b.png");
+  g_assert_cmpstr(g_object_get_data(G_OBJECT(anchor), VIEWMD_IMAGE_ALT_DATA),
+                  ==, "A & B");
+
+  markdown_apply_tags(buffer, "![A](images/a\\&amp;b.png)");
+  gtk_text_buffer_get_start_iter(buffer, &at);
+  anchor = gtk_text_iter_get_child_anchor(&at);
+  g_assert_nonnull(anchor);
+  g_assert_cmpstr(g_object_get_data(G_OBJECT(anchor), VIEWMD_IMAGE_SRC_DATA),
+                  ==, "images/a&amp;b.png");
+  g_object_unref(buffer);
+}
+
+static void test_entities_in_headings_and_tables(void) {
+  GtkTextBuffer *buffer = new_buffer();
+  markdown_apply_tags(buffer, "# Tom &amp; Jerry\n\n| Header |\n| --- |\n"
+                               "| &copy; &amp; &lt;b&gt; &NotEqualTilde; |\n");
+  g_assert_nonnull(gtk_text_buffer_get_mark(buffer, "viewmd-anchor-tom-jerry"));
+  GtkTextIter start, end;
+  gtk_text_buffer_get_bounds(buffer, &start, &end);
+  gchar *text = gtk_text_buffer_get_text(buffer, &start, &end, TRUE);
+  g_assert_nonnull(strstr(text, "© & <b> ≂̸"));
+  g_free(text);
+  g_object_unref(buffer);
+}
+
 int main(int argc, char **argv) {
   g_test_init(&argc, &argv, NULL);
   gtk_init_check(&argc, &argv);
@@ -166,6 +257,12 @@ int main(int argc, char **argv) {
   g_test_add_func("/markdown/tasks/nested", test_nested_tasks);
   g_test_add_func("/markdown/tasks/ordered", test_ordered_tasks);
   g_test_add_func("/markdown/tasks/hanging-indent", test_task_hanging_indent);
+  g_test_add_func("/markdown/entities/names", test_entity_names);
+  g_test_add_func("/markdown/entities/numbers", test_entity_numbers);
+  g_test_add_func("/markdown/entities/literals", test_entity_literals);
+  g_test_add_func("/markdown/entities/code", test_entities_in_code);
+  g_test_add_func("/markdown/entities/attributes", test_entity_attributes);
+  g_test_add_func("/markdown/entities/headings-and-tables", test_entities_in_headings_and_tables);
   gint result = g_test_run();
   config_free(config);
   return result;
