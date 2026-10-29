@@ -9,7 +9,7 @@ A lightweight GTK 3 markdown viewer for desktop Linux. It is ideal as your defau
 - **Native GTK viewer** - No webviews
 - **Read-only rendering** - Focused on viewing markdown files
 - **Minimal UI** - Clean toolbar with open and settings buttons
-- **Lightweight** - Pure C, no web technologies, fast startup
+- **Lightweight** - No web technologies, small codebase (~8 kLOC excluding md4c), fast startup
 - **Hyperlink support** - Left click opens links and internal anchors
 - **Document search** - `Ctrl+F` with next/previous match navigation
 - **Raw source access** - Right-click to view or copy the raw markdown
@@ -132,6 +132,96 @@ sudo apt install libgtk-3-dev
 ```bash
 sudo dnf install gtk3-devel
 ```
+
+## Why not GTK 4?
+
+ViewMD stays on GTK 3 deliberately. This project exists because a markdown
+viewer should be small in memory with many documents open - and the merged
+rendering model of GTK 4 works directly against that goal.
+
+Measured on a real desktop (AMD Radeon 780M, Mesa radeonsi, Ubuntu 24.04)
+with the exact same viewer-shaped window (header bar + two-tab notebook +
+scrolled text view with a rendered document) built once against GTK 3 and
+once against GTK 4:
+
+| toolkit | VmRSS | PSS |
+|---|---|---|
+| GTK 3 | ~35.5 MB | ~8.6 MB |
+| GTK 4 | ~212.6 MB | ~165.1 MB |
+
+That is roughly **6x the resident set** (and ~19x the proportional PSS) for a
+plain text viewer, for the same two-tab probe. The entire difference comes
+from GTK 4's OpenGL-first renderer: rendering goes through the retained
+scene-graph (`GskRenderer`) over OpenGL, and on AMD/radeonsi creating that GL
+context pulls Mesa's LLVM driver stack (`libLLVM` plus `libgallium`, tens of
+MB) and its caches resident in the process. GTK 3's immediate-mode
+Cairo path never loads any of it, even on a machine with a working GPU
+(radeonsi is LLVM-based, so the software stack stays mapped regardless).
+
+GTK 4 does ship a Cairo software renderer (`GSK_RENDERER=cairo`), but in our
+measurement that still kept the Mesa/LLVM working set resident, and the
+toolkit migration itself is large (event controllers instead of widget
+event signals, no `GtkContainer`/`GdkScreen`/`gtk_dialog_run`, a DnD rework),
+while our child-anchor-widget design for tables, code panels and fold
+toggles would be the only thing that survives mostly unchanged. Given the
+measured memory gap, GTK 4 is not worth it for a low-memory viewer.
+
+### Corroboration
+
+The mechanism and the order of magnitude are confirmed by GTK developers and
+users:
+
+- The official [GTK 4 drawing model](https://docs.gtk.org/gtk4/drawing-model.html)
+  documents the switch from GTK 3's immediate-mode Cairo painting to a
+  retained scene graph of `GskRenderNode`s, rendered via OpenGL/Vulkan/Cairo.
+- A GTK developer on [GNOME Discourse](https://discourse.gnome.org/t/valgrind-reports-memory-leak-with-gtk4/25598)
+  explains the one-off cost: "GTK4 initialises Vulkan or OpenGL, and the
+  driver can initialise their own shader cache", with Valgrind traces showing
+  `gdk_display_init_vulkan` / `gskrenderer.c` even before any window work - on
+  the same AMD-Mesa stack this project measured.
+- Third-party measurements are in the same range: an empty GTK 4 window
+  ~20 MB vs ~5.5 MB on GTK 3
+  ([r/GTK](https://www.reddit.com/r/GTK/comments/vv55p4/gtk4_memory_usage_unexpectedly_high/)),
+  simple GTK 4 dialogs > 100 MiB while comparable GTK 3 apps sit around 50 MiB
+  ([HN](https://news.ycombinator.com/item?id=46092441)),
+  and a "3 fold" increase after a GTK 3 to GTK 4 port
+  ([EndeavourOS forum](https://forum.endeavouros.com/t/how-to-significantly-reduce-memory-usage-memory-usage-in-gtk4-and-libadwaita-apps/79360)).
+
+Two caveats keep this fair:
+
+- Most of the delta is a fixed, one-time GL/driver cost, not a per-window or
+  per-tab one. For a tool whose selling point is many documents open, a large
+  fixed baseline is still the wrong trade, but it does not multiply with the
+  number of tabs.
+- `GSK_RENDERER=cairo` avoids GL and roughly halves GTK 4 memory, but the
+  [GskCairoRenderer](https://docs.gtk.org/gsk4/ctor.CairoRenderer.new.html) is
+  documented as a debug/comparison tool whose "usage should be avoided" (no
+  3D transforms, incomplete), and GTK env variables are not stable API.
+  GTK 4.16.2+ also reduced NGL renderer mmap pressure, but reports still show
+  GTK 4 sitting far above GTK 3.
+
+Reproduce the measurement yourself:
+
+```bash
+sudo apt install libgtk-4-dev   # once
+make -C bench run
+```
+
+### GTK 3 support horizon
+
+GTK 3.24 is in maintenance mode: no new features, but still maintained
+upstream for important bug/crash fixes, with an announced annual release
+cadence (latest 3.24.52, March 2026; next expected ~March 2027) and **no
+published end-of-life date**
+([gtk-3-24 releases](https://download.gnome.org/sources/gtk/3.24/),
+[Phoronix](https://www.phoronix.com/news/GTK3-Annual-Release-Cadence)).
+It remains packaged broadly: Ubuntu 22.04/24.04 LTS and the 2026 LTS line
+carry `libgtk-3` (as `libgtk-3-0t64` on the 64-bit-time transition), Debian
+12/13 and Fedora still ship it, and LTS/ESM cycles extend coverage into the
+late 2020s. For ViewMD that makes GTK 3 a fine runtime dependency through
+this decade; a toolkit move should only be revisited if upstream actually
+declares EOL or a distro drops it - and Wayland-specific rendering regressions
+are the area most likely to need a backport.
 
 ## Packaging Templates
 
