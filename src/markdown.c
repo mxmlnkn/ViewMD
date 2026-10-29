@@ -1226,8 +1226,13 @@ static int on_text(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size,
   RenderCtx *ctx = (RenderCtx *)userdata;
   gchar *rendered = NULL;
 
-  if (type == MD_TEXT_BR || type == MD_TEXT_SOFTBR) {
+  if (type == MD_TEXT_BR) {
     rendered = g_strdup("\n");
+  } else if (type == MD_TEXT_SOFTBR) {
+    /* A single newline inside a paragraph is a soft break and folds into a
+       space; only explicit hard breaks (backslash or two trailing spaces)
+       become visible line breaks. Source line-wrapping must not show up. */
+    rendered = g_strdup(" ");
   } else {
     rendered = md_text_to_utf8(type, text, size);
   }
