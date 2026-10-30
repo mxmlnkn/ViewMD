@@ -68,7 +68,10 @@ static void on_theme_changed(GtkComboBoxText *combo, gpointer user_data);
 static gchar *rgba_to_hex(const GdkRGBA *rgba);
 static void init_color_button(GtkColorButton *btn, const gchar *color_str);
 static void on_color_set(GtkColorButton *btn, gpointer user_data);
-static GtkWidget *create_settings_dialog(MarkydApp *app);
+static GtkWidget *create_settings_dialog(MarkydWindow *win);
+static void apply_settings_to_all_tabs(MarkydWindow *self);
+static void on_settings_response(GtkDialog *dialog, gint response,
+                                 gpointer user_data);
 
 static gboolean geometry_debug_enabled(void) {
   const gchar *v = g_getenv("VIEWMD_DEBUG_GEOMETRY");
@@ -1047,21 +1050,38 @@ static void on_refresh_clicked(GtkButton *button, gpointer user_data) {
 static void on_settings_clicked(GtkButton *button, gpointer user_data) {
   MarkydWindow *self = (MarkydWindow *)user_data;
   GtkWidget *dialog;
-  gint response;
 
   (void)button;
 
-  dialog = create_settings_dialog(self->app);
-  response = gtk_dialog_run(GTK_DIALOG(dialog));
+  dialog = create_settings_dialog(self);
+  gtk_widget_show(dialog);
+}
 
-  if (response == GTK_RESPONSE_APPLY || response == GTK_RESPONSE_OK) {
+static void apply_settings_to_all_tabs(MarkydWindow *self) {
+  if (!self || !self->editor) {
+    return;
+  }
+  markdown_update_accent_tags(self->editor->buffer);
+  markyd_editor_refresh(self->editor);
+  markyd_window_apply_css(self);
+}
+
+static void on_settings_response(GtkDialog *dialog, gint response,
+                                 gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+
+  if (response == GTK_RESPONSE_APPLY) {
     config_save(config);
-    markyd_window_apply_css(self);
-    markdown_update_accent_tags(self->editor->buffer);
-    markyd_editor_refresh(self->editor);
+    apply_settings_to_all_tabs(self);
+    return; /* apply without closing */
   }
 
-  gtk_widget_destroy(dialog);
+  if (response == GTK_RESPONSE_OK || response == GTK_RESPONSE_ACCEPT) {
+    config_save(config);
+    apply_settings_to_all_tabs(self);
+  }
+
+  gtk_widget_destroy(GTK_WIDGET(dialog));
 }
 
 static gboolean on_text_view_scroll(GtkWidget *widget, GdkEventScroll *event,
@@ -1325,7 +1345,7 @@ static void on_color_set(GtkColorButton *btn, gpointer user_data) {
   *target = rgba_to_hex(&rgba);
 }
 
-static GtkWidget *create_settings_dialog(MarkydApp *app) {
+static GtkWidget *create_settings_dialog(MarkydWindow *win) {
   GtkWidget *dialog;
   GtkWidget *content;
   GtkWidget *grid;
@@ -1340,9 +1360,12 @@ static GtkWidget *create_settings_dialog(MarkydApp *app) {
   gint row = 0;
 
   dialog = gtk_dialog_new_with_buttons(
-      "ViewMD Settings", GTK_WINDOW(app->window->window),
+      "ViewMD Settings", GTK_WINDOW(win->window),
       GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, "_Cancel",
-      GTK_RESPONSE_CANCEL, "_Apply", GTK_RESPONSE_APPLY, NULL);
+      GTK_RESPONSE_CANCEL, "_Apply", GTK_RESPONSE_APPLY, "_OK",
+      GTK_RESPONSE_OK, NULL);
+  gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
+  g_signal_connect(dialog, "response", G_CALLBACK(on_settings_response), win);
 
   gtk_window_set_default_size(GTK_WINDOW(dialog), 400, -1);
 
