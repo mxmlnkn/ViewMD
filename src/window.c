@@ -1332,6 +1332,7 @@ gboolean markyd_window_is_visible(MarkydWindow *self) {
 
 static void on_open_clicked(GtkButton *button, gpointer user_data) {
   MarkydWindow *self = (MarkydWindow *)user_data;
+  MarkydTab *active;
   GtkWidget *dialog;
   GtkFileFilter *md_filter;
   gint response;
@@ -1342,6 +1343,18 @@ static void on_open_clicked(GtkButton *button, gpointer user_data) {
       "Open Markdown Document", GTK_WINDOW(self->window),
       GTK_FILE_CHOOSER_ACTION_OPEN, "_Cancel", GTK_RESPONSE_CANCEL, "_Open",
       GTK_RESPONSE_ACCEPT, NULL);
+  gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(dialog), TRUE);
+
+  /* Seed the dialog with the active document's folder, if it has one. */
+  active = markyd_window_get_active_tab(self);
+  if (active && active->editor && active->editor->file_path &&
+      active->editor->file_path[0] != '\0') {
+    gchar *dir = g_path_get_dirname(active->editor->file_path);
+    if (dir) {
+      gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dialog), dir);
+      g_free(dir);
+    }
+  }
 
   md_filter = gtk_file_filter_new();
   gtk_file_filter_set_name(md_filter, "Markdown files (*.md, *.markdown)");
@@ -1356,20 +1369,33 @@ static void on_open_clicked(GtkButton *button, gpointer user_data) {
 
   response = gtk_dialog_run(GTK_DIALOG(dialog));
   if (response == GTK_RESPONSE_ACCEPT) {
-    gchar *path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
-    if (path) {
+    GSList *paths = gtk_file_chooser_get_filenames(GTK_FILE_CHOOSER(dialog));
+    GSList *node;
+    gboolean any_failed = FALSE;
+    gchar *first_failed = NULL;
+
+    /* Open in the order shown, and leave the last opened file active. */
+    for (node = paths; node != NULL; node = node->next) {
+      gchar *path = (gchar *)node->data;
       if (!markyd_window_open_document(self, path)) {
-        GtkWidget *error_dialog = gtk_message_dialog_new(
-            GTK_WINDOW(self->window),
-            GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR,
-            GTK_BUTTONS_CLOSE, "Failed to open document");
-        gtk_message_dialog_format_secondary_text(
-            GTK_MESSAGE_DIALOG(error_dialog), "%s", path);
-        gtk_dialog_run(GTK_DIALOG(error_dialog));
-        gtk_widget_destroy(error_dialog);
+        any_failed = TRUE;
+        if (!first_failed) {
+          first_failed = g_strdup(path);
+        }
       }
-      g_free(path);
     }
+    if (any_failed) {
+      GtkWidget *error_dialog = gtk_message_dialog_new(
+          GTK_WINDOW(self->window),
+          GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR,
+          GTK_BUTTONS_CLOSE, "Failed to open document");
+      gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(error_dialog),
+                                               "%s", first_failed);
+      gtk_dialog_run(GTK_DIALOG(error_dialog));
+      gtk_widget_destroy(error_dialog);
+    }
+    g_free(first_failed);
+    g_slist_free_full(paths, g_free);
   }
 
   gtk_widget_destroy(dialog);
