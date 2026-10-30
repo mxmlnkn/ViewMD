@@ -47,6 +47,7 @@ static void set_table_cell_highlight(GtkWidget *cell, gboolean match,
 static gboolean scroll_to_table_cell(MarkydWindow *self, GtkWidget *cell);
 static void show_search_ui(MarkydWindow *self);
 static void hide_search_ui(MarkydWindow *self);
+static void on_search_clicked(GtkButton *button, gpointer user_data);
 static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event,
                                    gpointer user_data);
 static gboolean on_text_view_scroll(GtkWidget *widget, GdkEventScroll *event,
@@ -538,6 +539,20 @@ static void hide_search_ui(MarkydWindow *self) {
   markyd_editor_focus(self->editor);
 }
 
+static void on_search_clicked(GtkButton *button, gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+
+  (void)button;
+  if (!self || !self->search_revealer) {
+    return;
+  }
+  if (gtk_revealer_get_reveal_child(GTK_REVEALER(self->search_revealer))) {
+    hide_search_ui(self);
+  } else {
+    show_search_ui(self);
+  }
+}
+
 static void on_search_changed(GtkEditable *editable, gpointer user_data) {
   MarkydWindow *self = (MarkydWindow *)user_data;
   (void)editable;
@@ -686,6 +701,12 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
   g_signal_connect(self->btn_refresh, "clicked", G_CALLBACK(on_refresh_clicked),
                    self);
 
+  self->btn_search =
+      gtk_button_new_from_icon_name("edit-find-symbolic", GTK_ICON_SIZE_BUTTON);
+  gtk_widget_set_tooltip_text(self->btn_search, "Find in document (Ctrl+F)");
+  g_signal_connect(self->btn_search, "clicked", G_CALLBACK(on_search_clicked),
+                   self);
+
   self->btn_settings =
       gtk_button_new_from_icon_name("emblem-system-symbolic", GTK_ICON_SIZE_BUTTON);
   gtk_widget_set_tooltip_text(self->btn_settings, "Settings");
@@ -695,6 +716,7 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
   left_buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_box_pack_start(GTK_BOX(left_buttons), self->btn_open, FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(left_buttons), self->btn_refresh, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(left_buttons), self->btn_search, FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(left_buttons), self->btn_settings, FALSE, FALSE, 0);
   gtk_header_bar_pack_start(GTK_HEADER_BAR(self->header_bar), left_buttons);
 
