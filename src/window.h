@@ -23,6 +23,7 @@ typedef struct _MarkydWindow {
   MarkydApp *app;
   GArray *search_matches;
   gint search_current_index;
+  gdouble zoom_accumulator;
 } MarkydWindow;
 
 /* Lifecycle */

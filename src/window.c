@@ -49,6 +49,8 @@ static void show_search_ui(MarkydWindow *self);
 static void hide_search_ui(MarkydWindow *self);
 static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event,
                                    gpointer user_data);
+static gboolean on_text_view_scroll(GtkWidget *widget, GdkEventScroll *event,
+                                    gpointer user_data);
 static gboolean on_configure_event(GtkWidget *widget, GdkEventConfigure *event,
                                    gpointer user_data);
 static gboolean on_window_state_event(GtkWidget *widget,
@@ -749,6 +751,8 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
   self->editor = markyd_editor_new(app);
   gtk_container_add(GTK_CONTAINER(self->scroll),
                     markyd_editor_get_widget(self->editor));
+  g_signal_connect(self->editor->text_view, "scroll-event",
+                   G_CALLBACK(on_text_view_scroll), self);
   self->search_matches = g_array_new(FALSE, FALSE, sizeof(SearchMatch));
   self->search_current_index = -1;
   g_signal_connect(self->editor->buffer, "changed",
@@ -1012,6 +1016,60 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
   }
 
   gtk_widget_destroy(dialog);
+}
+
+static gboolean on_text_view_scroll(GtkWidget *widget, GdkEventScroll *event,
+                                    gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+  gboolean zoom_in;
+  gint new_size;
+
+  (void)widget;
+  /* Font size is only adjusted on Ctrl+Scroll. */
+  if (!self || !event || (event->state & GDK_CONTROL_MASK) == 0) {
+    if (self) {
+      /* Do not carry a partial smooth-scroll delta into the next gesture. */
+      self->zoom_accumulator = 0.0;
+    }
+    return FALSE;
+  }
+
+  if (event->direction == GDK_SCROLL_SMOOTH) {
+    /* Touchpads emit many small smooth deltas. Accumulate them, so the font
+       steps once per unit of scroll distance instead of once per event. */
+    self->zoom_accumulator += event->delta_y;
+    if (self->zoom_accumulator <= -1.0) {
+      zoom_in = TRUE;
+      self->zoom_accumulator = 0.0;
+    } else if (self->zoom_accumulator >= 1.0) {
+      zoom_in = FALSE;
+      self->zoom_accumulator = 0.0;
+    } else {
+      return TRUE;
+    }
+  } else if (event->direction == GDK_SCROLL_UP) {
+    zoom_in = TRUE;
+    self->zoom_accumulator = 0.0;
+  } else if (event->direction == GDK_SCROLL_DOWN) {
+    zoom_in = FALSE;
+    self->zoom_accumulator = 0.0;
+  } else {
+    return FALSE;
+  }
+
+  new_size = config->font_size + (zoom_in ? 1 : -1);
+  if (new_size < 8) {
+    new_size = 8;
+  }
+  if (new_size > 48) {
+    new_size = 48;
+  }
+
+  if (new_size != config->font_size) {
+    config->font_size = new_size;
+    markyd_window_apply_css(self);
+  }
+  return TRUE;
 }
 
 static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event,
