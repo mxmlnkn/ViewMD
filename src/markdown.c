@@ -90,6 +90,7 @@ typedef struct {
   gchar *code_language; /* fenced code block language, or "" */
   /* Collapse state */
   GHashTable *collapsed; /* heading/details key -> TRUE; borrowed */
+  GPtrArray *headings_out; /* ViewmdHeading* appended during render; borrowed */
   gint heading_level;
   gboolean in_details_summary;
   GtkTextChildAnchor *current_fold_anchor;
@@ -855,16 +856,12 @@ static void on_code_copy_clicked(GtkButton *button, gpointer user_data) {
 static void code_widget_text_view_setup(GtkTextView *text_view) {
   gtk_text_view_set_editable(text_view, FALSE);
   gtk_text_view_set_cursor_visible(text_view, FALSE);
-  /* Long lines wrap instead of blowing the block up to thousands of pixels
-     (that also produced invalid 'width: 2599, height: -1' allocations while
-     scrolling). */
-  gtk_text_view_set_wrap_mode(text_view, GTK_WRAP_CHAR);
-  gtk_widget_set_size_request(GTK_WIDGET(text_view), 480, -1);
+  /* No wrapping; the scrolled window caps the width and scrolls long lines. */
+  gtk_text_view_set_wrap_mode(text_view, GTK_WRAP_NONE);
   gtk_text_view_set_top_margin(text_view, 8);
   gtk_text_view_set_bottom_margin(text_view, 8);
   gtk_text_view_set_left_margin(text_view, 12);
   gtk_text_view_set_right_margin(text_view, 12);
-  gtk_widget_set_hexpand(GTK_WIDGET(text_view), TRUE);
   gtk_text_view_set_accepts_tab(text_view, FALSE);
 }
 
@@ -875,8 +872,11 @@ GtkWidget *markdown_create_code_block_widget(GtkTextChildAnchor *anchor) {
   GtkWidget *header;
   GtkWidget *lang_label;
   GtkWidget *copy_button;
+  GtkWidget *code_scroll;
   GtkTextBuffer *code_buffer;
   GtkWidget *code_view;
+  gint n_lines;
+  gint block_height;
   const MarkydLanguageHighlight *language;
 
   if (!anchor) {
@@ -922,7 +922,35 @@ GtkWidget *markdown_create_code_block_widget(GtkTextChildAnchor *anchor) {
   code_view = gtk_text_view_new_with_buffer(code_buffer);
   code_widget_text_view_setup(GTK_TEXT_VIEW(code_view));
   g_object_unref(code_buffer);
-  gtk_box_pack_start(GTK_BOX(box), code_view, FALSE, FALSE, 0);
+
+  /* Deterministic widget size so the text layout reserves exactly this much
+     vertical space (a natural-height request that later grows overlaps the
+     following lines and triggers negative-size allocations on re-layout).
+     Long lines scroll horizontally inside the block. */
+  n_lines = 1;
+  if (code) {
+    for (const gchar *p = code; *p; p++) {
+      if (*p == '\n') {
+        n_lines++;
+      }
+    }
+  }
+  block_height = n_lines * 24 + 8;
+  if (block_height > 260) {
+    block_height = 260;
+  }
+  if (block_height < 32) {
+    block_height = 32;
+  }
+
+  code_scroll = gtk_scrolled_window_new(NULL, NULL);
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(code_scroll),
+                                 GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(code_scroll),
+                                      GTK_SHADOW_NONE);
+  gtk_widget_set_size_request(code_scroll, 480, block_height);
+  gtk_container_add(GTK_CONTAINER(code_scroll), code_view);
+  gtk_box_pack_start(GTK_BOX(box), code_scroll, FALSE, FALSE, 0);
 
   return box;
 }
@@ -1587,17 +1615,21 @@ static int on_leave_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
   }
 
   if (type == MD_BLOCK_H) {
+    gboolean is_details =
+        ctx->current_fold_anchor &&
+        g_object_get_data(G_OBJECT(ctx->current_fold_anchor),
+                          VIEWMD_FOLD_IS_DETAILS_DATA) != NULL;
     gchar *heading_slug = create_heading_anchor(ctx);
     ctx->in_heading = FALSE;
 
     if (ctx->current_fold_anchor) {
       const gchar *anchor_is_details = g_object_get_data(
           G_OBJECT(ctx->current_fold_anchor), VIEWMD_FOLD_IS_DETAILS_DATA);
-      gboolean is_details = anchor_is_details != NULL;
+      gboolean fold_is_details = anchor_is_details != NULL;
       gchar *key;
       gboolean collapsed;
 
-      if (is_details) {
+      if (fold_is_details) {
         key = g_strdup(ctx->pending_details_id ? ctx->pending_details_id : "");
         collapsed = fold_is_collapsed(ctx, key, !ctx->pending_details_open);
         ctx->in_details_summary = FALSE;
@@ -1617,7 +1649,7 @@ static int on_leave_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
                         GINT_TO_POINTER(collapsed ? 1 : 0));
 
       if (collapsed) {
-        if (is_details) {
+        if (fold_is_details) {
           ctx->details_skip = TRUE;
           ctx->details_skip_depth = 1;
         } else {
@@ -1626,6 +1658,16 @@ static int on_leave_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
       }
       g_free(key);
     }
+
+    if (ctx->headings_out && !is_details && heading_slug &&
+        ctx->heading_text && ctx->heading_text->len > 0) {
+      ViewmdHeading *h = g_new0(ViewmdHeading, 1);
+      h->level = ctx->heading_level;
+      h->text = g_strdup(ctx->heading_text->str);
+      h->slug = g_strdup(heading_slug);
+      g_ptr_array_add(ctx->headings_out, h);
+    }
+
     g_clear_pointer(&ctx->pending_details_id, g_free);
     g_free(heading_slug);
     ctx->current_fold_anchor = NULL;
@@ -2251,7 +2293,7 @@ GtkWidget *markdown_create_fold_widget(GtkTextChildAnchor *anchor) {
 }
 
 void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source,
-                         GHashTable *collapsed) {
+                         GHashTable *collapsed, GPtrArray *headings_out) {
   RenderCtx ctx;
   MD_PARSER parser = {0};
   gchar *normalized_source;
@@ -2274,6 +2316,7 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source,
   ctx.list_stack = g_array_new(FALSE, FALSE, sizeof(ListState));
   ctx.anchor_counts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
   ctx.collapsed = collapsed;
+  ctx.headings_out = headings_out;
   ctx.heading_start_offset = 0;
   ctx.heading_level = 1;
   ctx.has_output = FALSE;

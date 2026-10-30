@@ -71,6 +71,11 @@ static void on_tab_close_clicked(GtkButton *button, gpointer user_data);
 static gboolean update_tab_label(MarkydWindow *self, MarkydTab *tab);
 static gboolean load_document_into_tab(MarkydWindow *self, MarkydTab *tab,
                                        const gchar *path);
+static void update_toc(MarkydWindow *self);
+static void on_editor_rendered(MarkydEditor *editor);
+static void on_toc_toggle_clicked(GtkButton *button, gpointer user_data);
+static void on_toc_row_activated(GtkListBox *list, GtkListBoxRow *row,
+                                 gpointer user_data);
 
 static void on_font_size_changed(GtkSpinButton *spin, gpointer user_data);
 static void on_font_family_changed(GtkComboBoxText *combo, gpointer user_data);
@@ -750,10 +755,17 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
   g_signal_connect(self->btn_settings, "clicked", G_CALLBACK(on_settings_clicked),
                    self);
 
+  self->btn_toc = gtk_button_new_from_icon_name("view-list-ordered-symbolic",
+                                                  GTK_ICON_SIZE_BUTTON);
+  gtk_widget_set_tooltip_text(self->btn_toc, "Toggle table of contents");
+  g_signal_connect(self->btn_toc, "clicked", G_CALLBACK(on_toc_toggle_clicked),
+                   self);
+
   left_buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_box_pack_start(GTK_BOX(left_buttons), self->btn_open, FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(left_buttons), self->btn_refresh, FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(left_buttons), self->btn_search, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(left_buttons), self->btn_toc, FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(left_buttons), self->btn_settings, FALSE, FALSE, 0);
   gtk_header_bar_pack_start(GTK_HEADER_BAR(self->header_bar), left_buttons);
 
@@ -813,7 +825,24 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
      which demotes a document opened at startup (CLI) to the first tab.
      Re-assert the desired page once the window has been shown. */
   g_idle_add(on_notebook_reassert_page, self);
-  gtk_box_pack_start(GTK_BOX(main_box), self->notebook, TRUE, TRUE, 0);
+
+  self->paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+  gtk_box_pack_start(GTK_BOX(main_box), self->paned, TRUE, TRUE, 0);
+
+  self->toc_scroll = gtk_scrolled_window_new(NULL, NULL);
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(self->toc_scroll),
+                                 GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+  gtk_widget_set_size_request(self->toc_scroll, 210, -1);
+  self->toc_list = gtk_list_box_new();
+  gtk_widget_set_hexpand(self->toc_list, TRUE);
+  gtk_style_context_add_class(gtk_widget_get_style_context(self->toc_list),
+                              "viewmd-toc");
+  g_signal_connect(self->toc_list, "row-activated",
+                   G_CALLBACK(on_toc_row_activated), self);
+  gtk_container_add(GTK_CONTAINER(self->toc_scroll), self->toc_list);
+  gtk_paned_pack1(GTK_PANED(self->paned), self->toc_scroll, FALSE, FALSE);
+
+  gtk_paned_pack2(GTK_PANED(self->paned), self->notebook, TRUE, FALSE);
 
   self->tabs = g_ptr_array_new_with_free_func(NULL);
   self->active_index = -1;
@@ -827,6 +856,10 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
   markyd_window_apply_css(self);
 
   gtk_widget_show_all(self->window);
+  /* show_all above would reveal the sidebar again; keep the ToC closed and
+     resize the paned back to content. */
+  gtk_widget_hide(self->toc_scroll);
+  gtk_paned_set_position(GTK_PANED(self->paned), 210);
 
   return self;
 }
@@ -840,6 +873,102 @@ static gboolean on_notebook_reassert_page(gpointer user_data) {
                                   self->active_index);
   }
   return G_SOURCE_REMOVE;
+}
+
+static void on_toc_toggle_clicked(GtkButton *button, gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+  gboolean visible;
+
+  (void)button;
+  if (!self || !self->toc_scroll) {
+    return;
+  }
+
+  visible = gtk_widget_get_visible(self->toc_scroll);
+  if (visible) {
+    gtk_widget_hide(self->toc_scroll);
+  } else {
+    update_toc(self);
+    gtk_widget_show(self->toc_scroll);
+  }
+}
+
+static void on_toc_row_activated(GtkListBox *list, GtkListBoxRow *row,
+                                 gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+  MarkydTab *tab;
+  const gchar *slug;
+
+  (void)list;
+  if (!self) {
+    return;
+  }
+  slug = g_object_get_data(G_OBJECT(row), "viewmd-toc-slug");
+  if (!slug) {
+    return;
+  }
+
+  tab = markyd_window_get_active_tab(self);
+  if (tab && tab->editor) {
+    markyd_editor_scroll_to_anchor(tab->editor, slug[0] != '\0' ? slug : NULL);
+    markyd_editor_focus(tab->editor);
+  }
+}
+
+static void update_toc(MarkydWindow *self) {
+  MarkydTab *tab;
+  const GPtrArray *headings;
+
+  if (!self || !self->toc_list) {
+    return;
+  }
+
+  tab = markyd_window_get_active_tab(self);
+  headings = tab ? markyd_editor_get_headings(tab->editor) : NULL;
+
+  /* Clear existing rows. */
+  {
+    GtkListBoxRow *row;
+    while ((row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(self->toc_list),
+                                                0))) {
+      gtk_widget_destroy(GTK_WIDGET(row));
+    }
+  }
+
+  if (!headings) {
+    return;
+  }
+
+  for (guint i = 0; i < headings->len; i++) {
+    ViewmdHeading *h = g_ptr_array_index(headings, i);
+    GtkWidget *row = gtk_list_box_row_new();
+    GtkWidget *label = gtk_label_new(h->text);
+
+    gtk_widget_set_halign(label, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(label, 8 + 14 * (h->level - 1));
+    gtk_widget_set_margin_top(label, 2);
+    gtk_widget_set_margin_bottom(label, 2);
+    g_object_set_data_full(G_OBJECT(row), "viewmd-toc-slug", g_strdup(h->slug),
+                           g_free);
+    gtk_container_add(GTK_CONTAINER(row), label);
+    gtk_list_box_insert(GTK_LIST_BOX(self->toc_list), row, -1);
+    gtk_widget_show_all(row);
+  }
+}
+
+static void on_editor_rendered(MarkydEditor *editor) {
+  MarkydWindow *self;
+  MarkydTab *tab;
+
+  if (!editor || !editor->app || !editor->app->window) {
+    return;
+  }
+  self = editor->app->window;
+  tab = markyd_window_get_active_tab(self);
+  if (tab && tab->editor == editor && self->toc_scroll &&
+      gtk_widget_get_visible(self->toc_scroll)) {
+    update_toc(self);
+  }
 }
 
 static gboolean on_tab_label_button_press(GtkWidget *widget,
@@ -882,6 +1011,9 @@ static void on_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
   }
   self->active_index = (gint)page_num;
   self->editor = tab->editor;
+  if (self->toc_scroll && gtk_widget_get_visible(self->toc_scroll)) {
+    update_toc(self);
+  }
   markyd_app_update_window_title(self->app);
 }
 
@@ -983,6 +1115,10 @@ MarkydTab *markyd_window_new_tab(MarkydWindow *self) {
   g_ptr_array_add(self->tabs, tab);
   gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(self->notebook), tab->scroll,
                                    TRUE);
+  /* Realizing a widget (show_all) after set_current_page silently resets the
+     notebook back to page 0, so realize first, then select the new page. */
+  gtk_widget_show_all(tab->scroll);
+  gtk_widget_show_all(tab->tab_label);
   gtk_notebook_set_current_page(GTK_NOTEBOOK(self->notebook), page);
   self->active_index = page;
   self->editor = tab->editor;
@@ -991,8 +1127,7 @@ MarkydTab *markyd_window_new_tab(MarkydWindow *self) {
                    G_CALLBACK(on_editor_buffer_changed), self);
   g_signal_connect(tab->editor->text_view, "scroll-event",
                    G_CALLBACK(on_text_view_scroll), self);
-  gtk_widget_show_all(tab->scroll);
-  gtk_widget_show_all(tab->tab_label);
+  tab->editor->on_rendered = on_editor_rendered;
 
   return tab;
 }
@@ -1373,6 +1508,41 @@ void markyd_window_apply_css(MarkydWindow *self) {
   gtk_style_context_add_provider_for_screen(
       gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
       GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+
+  static GtkCssProvider *css_extra = NULL;
+  {
+    gchar *css_extra_str;
+
+    if (css_extra) {
+      gtk_style_context_remove_provider_for_screen(
+          gdk_screen_get_default(), GTK_STYLE_PROVIDER(css_extra));
+      g_object_unref(css_extra);
+    }
+    css_extra = gtk_css_provider_new();
+
+    css_extra_str = g_strdup_printf(
+        ".viewmd-toc { background-color: %s; }"
+        ".viewmd-toc label { color: %s; }"
+        ".viewmd-toc row { background-color: %s; border: none; }"
+        ".viewmd-toc row:hover { background-color: %s; }"
+        ".viewmd-toc row:selected { background-color: %s; color: %s; }"
+        ".viewmd-code-block scrolledwindow { background-color: %s; }"
+        /* Tab close button: Adwaita's hover pill is nearly invisible on the
+           tab background, so paint a contrasting one. */
+        "notebook header tab button { background-image: none; "
+        "  background-color: transparent; border: none; border-radius: 4px; "
+        "  padding: 1px; min-width: 20px; min-height: 20px; "
+        "  color: alpha(%s, 0.75); }"
+        "notebook header tab button:hover { background-color: alpha(%s, 0.28); "
+        "  color: %s; }"
+        "notebook header tab button:active { background-color: alpha(%s, 0.5); }",
+        bg, fg, bg, code_bg, sel_bg, fg, code_bg, fg, fg, fg, fg);
+    gtk_css_provider_load_from_data(css_extra, css_extra_str, -1, NULL);
+    g_free(css_extra_str);
+    gtk_style_context_add_provider_for_screen(
+        gdk_screen_get_default(), GTK_STYLE_PROVIDER(css_extra),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  }
 
   update_search_tag_styles(self, search_match_bg, search_match_fg,
                            search_current_bg, search_current_fg);
