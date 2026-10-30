@@ -50,6 +50,9 @@ static void hide_search_ui(MarkydWindow *self);
 static void on_search_clicked(GtkButton *button, gpointer user_data);
 static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event,
                                    gpointer user_data);
+static void on_drag_data_received(GtkWidget *widget, GdkDragContext *context,
+                                  gint x, gint y, GtkSelectionData *data,
+                                  guint info, guint time, gpointer user_data);
 static gboolean on_text_view_scroll(GtkWidget *widget, GdkEventScroll *event,
                                     gpointer user_data);
 static gboolean on_configure_event(GtkWidget *widget, GdkEventConfigure *event,
@@ -642,6 +645,14 @@ static void on_editor_buffer_changed(GtkTextBuffer *buffer, gpointer user_data) 
   update_search_matches(self);
 }
 
+static void setup_file_drop_target(GtkWidget *widget, MarkydWindow *self) {
+  GtkTargetEntry targets[] = {{"text/uri-list", 0, 0}};
+
+  gtk_drag_dest_set(widget, GTK_DEST_DEFAULT_ALL, targets, 1, GDK_ACTION_COPY);
+  g_signal_connect(widget, "drag-data-received",
+                   G_CALLBACK(on_drag_data_received), self);
+}
+
 MarkydWindow *markyd_window_new(MarkydApp *app) {
   MarkydWindow *self = g_new0(MarkydWindow, 1);
   GtkWidget *left_buttons;
@@ -680,6 +691,8 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
                    G_CALLBACK(on_configure_event), self);
   g_signal_connect(self->window, "window-state-event",
                    G_CALLBACK(on_window_state_event), self);
+
+  setup_file_drop_target(self->window, self);
 
   self->header_bar = gtk_header_bar_new();
   gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(self->header_bar), TRUE);
@@ -775,6 +788,17 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
                     markyd_editor_get_widget(self->editor));
   g_signal_connect(self->editor->text_view, "scroll-event",
                    G_CALLBACK(on_text_view_scroll), self);
+
+  /* The text view registers its own drop target (text/plain), stealing file
+     drops in the document area from the window; let the window handle them.
+     gtk_drag_dest_unset warns unless the widget is currently a destination,
+     so only unset what was set. */
+  if (gtk_drag_dest_get_target_list(self->editor->text_view) != NULL) {
+    gtk_drag_dest_unset(self->editor->text_view);
+  }
+  if (gtk_drag_dest_get_target_list(self->scroll) != NULL) {
+    gtk_drag_dest_unset(self->scroll);
+  }
   self->search_matches = g_array_new(FALSE, FALSE, sizeof(SearchMatch));
   self->search_current_index = -1;
   g_signal_connect(self->editor->buffer, "changed",
@@ -1092,6 +1116,36 @@ static gboolean on_text_view_scroll(GtkWidget *widget, GdkEventScroll *event,
     markyd_window_apply_css(self);
   }
   return TRUE;
+}
+
+static void on_drag_data_received(GtkWidget *widget, GdkDragContext *context,
+                                  gint x, gint y, GtkSelectionData *data,
+                                  guint info, guint time,
+                                  gpointer user_data) {
+  MarkydWindow *self = (MarkydWindow *)user_data;
+  gchar **uris;
+  gchar **uri;
+
+  (void)widget;
+  (void)x;
+  (void)y;
+  (void)info;
+
+  uris = gtk_selection_data_get_uris(data);
+  if (!uris) {
+    gtk_drag_finish(context, FALSE, FALSE, time);
+    return;
+  }
+  for (uri = uris; *uri != NULL; uri++) {
+    gchar *path = g_filename_from_uri(*uri, NULL, NULL);
+    if (!path) {
+      continue;
+    }
+    markyd_app_open_file(self->app, path);
+    g_free(path);
+  }
+  g_strfreev(uris);
+  gtk_drag_finish(context, TRUE, FALSE, time);
 }
 
 static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event,
