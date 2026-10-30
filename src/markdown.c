@@ -1903,6 +1903,20 @@ static int on_text(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size,
   return 0;
 }
 
+/* Apply or drop the inline-code background tag per the user preference. Inline
+   code is Pango text, so its background is a plain rectangle; there is no way
+   to round it, which is why it can be turned off entirely. */
+static void apply_inline_code_background(GtkTextTag *tag) {
+  if (!tag) {
+    return;
+  }
+  if (config && config->inline_code_background_enabled) {
+    g_object_set(tag, "background", config->inline_code_background, NULL);
+  } else {
+    g_object_set(tag, "background", (const gchar *)NULL, NULL);
+  }
+}
+
 void markdown_init_tags(GtkTextBuffer *buffer) {
   gtk_text_buffer_create_tag(buffer, TAG_INVISIBLE, "invisible", TRUE, NULL);
 
@@ -1921,10 +1935,10 @@ void markdown_init_tags(GtkTextBuffer *buffer) {
                              NULL);
   gtk_text_buffer_create_tag(buffer, TAG_STRIKE, "strikethrough", TRUE, NULL);
 
-  gtk_text_buffer_create_tag(buffer, TAG_CODE, "family",
-                             config->code_font_family, "background",
-                             config->inline_code_background, "foreground",
-                             config->inline_code_foreground, NULL);
+  GtkTextTag *code_tag = gtk_text_buffer_create_tag(
+      buffer, TAG_CODE, "family", config->code_font_family, "foreground",
+      config->inline_code_foreground, NULL);
+  apply_inline_code_background(code_tag);
 
   gtk_text_buffer_create_tag(buffer, MARKYD_TAG_CODE_KW_A, "family",
                              config->code_font_family, "foreground",
@@ -2029,8 +2043,8 @@ void markdown_update_accent_tags(GtkTextBuffer *buffer) {
   tag = gtk_text_tag_table_lookup(table, TAG_CODE);
   if (tag) {
     g_object_set(tag, "family", config->code_font_family, "foreground",
-                 config->inline_code_foreground, "background",
-                 config->inline_code_background, NULL);
+                 config->inline_code_foreground, NULL);
+    apply_inline_code_background(tag);
   }
   tag = gtk_text_tag_table_lookup(table, TAG_QUOTE);
   if (tag) {
