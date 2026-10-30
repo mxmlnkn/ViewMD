@@ -79,6 +79,7 @@ MarkydConfig *config_new(void) {
   cfg->line_numbers = FALSE;
   cfg->word_wrap = TRUE;
   cfg->always_show_scrollbars = TRUE;
+  cfg->inline_code_background_enabled = FALSE;
 
   return cfg;
 }
@@ -254,6 +255,10 @@ gboolean config_load(MarkydConfig *cfg) {
   if (g_key_file_has_key(keyfile, "Editor", "always_show_scrollbars", NULL))
     cfg->always_show_scrollbars = g_key_file_get_boolean(
         keyfile, "Editor", "always_show_scrollbars", NULL);
+  if (g_key_file_has_key(keyfile, "Editor", "inline_code_background_enabled",
+                         NULL))
+    cfg->inline_code_background_enabled = g_key_file_get_boolean(
+        keyfile, "Editor", "inline_code_background_enabled", NULL);
 
   g_key_file_free(keyfile);
   return TRUE;
@@ -316,6 +321,8 @@ gboolean config_save(MarkydConfig *cfg) {
   g_key_file_set_boolean(keyfile, "Editor", "word_wrap", cfg->word_wrap);
   g_key_file_set_boolean(keyfile, "Editor", "always_show_scrollbars",
                          cfg->always_show_scrollbars);
+  g_key_file_set_boolean(keyfile, "Editor", "inline_code_background_enabled",
+                         cfg->inline_code_background_enabled);
 
   data = g_key_file_to_data(keyfile, &length, &error);
   if (error) {

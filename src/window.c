@@ -2233,9 +2233,14 @@ static void add_section_label(GtkWidget *grid, gint *row, const gchar *text) {
 }
 
 static void on_always_scrollbars_toggled(GtkToggleButton *toggle,
-                                        gpointer user_data) {
+                                         gpointer user_data) {
   (void)user_data;
   config->always_show_scrollbars = gtk_toggle_button_get_active(toggle);
+}
+
+static void on_inline_code_bg_toggled(GtkToggleButton *toggle, gpointer user_data) {
+  (void)user_data;
+  config->inline_code_background_enabled = gtk_toggle_button_get_active(toggle);
 }
 
 static GtkWidget *create_settings_dialog(MarkydWindow *win) {
@@ -2369,6 +2374,16 @@ static GtkWidget *create_settings_dialog(MarkydWindow *win) {
   add_section_label(grid, &row, "Code");
   add_color_row(grid, &row, "Code block:", &config->code_background, ui);
   add_color_row(grid, &row, "Code text:", &config->code_foreground, ui);
+  {
+    GtkWidget *inline_bg =
+        gtk_check_button_new_with_label("Show inline code background");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(inline_bg),
+                                 config->inline_code_background_enabled);
+    g_signal_connect(inline_bg, "toggled", G_CALLBACK(on_inline_code_bg_toggled),
+                     NULL);
+    gtk_widget_set_halign(inline_bg, GTK_ALIGN_START);
+    gtk_grid_attach(GTK_GRID(grid), inline_bg, 0, row++, 2, 1);
+  }
   add_color_row(grid, &row, "Inline code:", &config->inline_code_background,
                 ui);
   add_color_row(grid, &row, "Inline text:", &config->inline_code_foreground,

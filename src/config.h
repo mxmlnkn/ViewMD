@@ -29,6 +29,7 @@ typedef struct _MarkydConfig {
   /* Inline code colors */
   gchar *inline_code_background;
   gchar *inline_code_foreground;
+  gboolean inline_code_background_enabled;
 
   /* Markdown accent colors */
   gchar *h1_color;
