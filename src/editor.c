@@ -1,6 +1,7 @@
 #include "editor.h"
 #include "app.h"
 #include "markdown.h"
+#include <math.h>
 #include <string.h>
 
 static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event,
@@ -19,9 +20,19 @@ static void render_code_block_widgets(MarkydEditor *self);
 static void render_fold_widgets(MarkydEditor *self);
 static void refresh_image_widget_scales(MarkydEditor *self);
 static gboolean resolve_image_source_path(MarkydEditor *self, const gchar *src,
-                                          gchar **out_path);
-static void on_text_view_size_allocate(GtkWidget *widget, GtkAllocation *allocation,
-                                       gpointer user_data);
+                                           gchar **out_path);
+static void update_scroll_anchor(MarkydEditor *self);
+static gboolean restore_scroll_anchor(MarkydEditor *self, gboolean prefer_heading);
+static void schedule_scroll_anchor_restore(MarkydEditor *self);
+static gboolean restore_scroll_anchor_idle(gpointer user_data);
+static void on_vadjustment_value_changed(GtkAdjustment *adjustment,
+                                         gpointer user_data);
+static void on_text_view_size_allocate_before(GtkWidget *widget,
+                                              GtkAllocation *allocation,
+                                              gpointer user_data);
+static void on_text_view_size_allocate_after(GtkWidget *widget,
+                                             GtkAllocation *allocation,
+                                             gpointer user_data);
 
 static gchar *get_url_from_iter_tags(GtkTextIter *iter) {
   GSList *tags;
@@ -109,7 +120,10 @@ static gboolean scroll_to_markdown_anchor(MarkydEditor *self,
     gtk_text_buffer_get_iter_at_mark(self->buffer, &at, mark);
     gtk_text_buffer_place_cursor(self->buffer, &at);
   }
-  gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(self->text_view), mark, 0.2, FALSE,
+  /* within_margin must be a fraction of the viewport in [0, 0.5); anything
+     larger fails the assertion and silently skips the scroll. use_align
+     with yalign 0 puts the heading line at the top edge. */
+  gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(self->text_view), mark, 0.0, TRUE,
                                0.0, 0.0);
   return TRUE;
 }
@@ -137,21 +151,46 @@ static void set_link_cursor(MarkydEditor *self, gboolean active) {
 }
 
 static void apply_markdown(MarkydEditor *self) {
+  gboolean preserve_scroll = FALSE;
+
   if (!self || !self->buffer || !self->text_view) {
     return;
   }
 
   self->updating_tags = TRUE;
+  /* Rebuilding the buffer scrolls it to the top, so remember the anchored
+     line from the old layout first and restore it once the new document has
+     been laid out. Freezing keeps the adjustment's own value-changed handler
+     from overwriting the captured anchor while the buffer is cleared. */
+  if (!self->in_resize_pass) {
+    update_scroll_anchor(self);
+    if (self->scroll_anchor_valid) {
+      self->scroll_anchor_frozen = TRUE;
+      preserve_scroll = TRUE;
+    }
+  }
+  if (self->headings) {
+    g_ptr_array_set_size(self->headings, 0);
+  }
   markdown_apply_tags(self->buffer,
                       self->source_content ? self->source_content : "",
-                      self->collapsed);
+                      self->collapsed, self->headings);
   render_image_widgets(self);
   render_table_widgets(self);
   render_frontmatter_widgets(self);
   render_code_block_widgets(self);
   render_fold_widgets(self);
   refresh_image_widget_scales(self);
+  if (preserve_scroll) {
+    schedule_scroll_anchor_restore(self);
+  } else {
+    self->scroll_anchor_frozen = FALSE;
+    update_scroll_anchor(self);
+  }
   self->updating_tags = FALSE;
+  if (self->on_rendered) {
+    self->on_rendered(self);
+  }
 }
 
 static gboolean resolve_image_source_path(MarkydEditor *self, const gchar *src,
@@ -502,6 +541,14 @@ static void schedule_markdown_apply(MarkydEditor *self) {
 
 void markyd_editor_refresh(MarkydEditor *self) { schedule_markdown_apply(self); }
 
+static void viewmd_heading_free(gpointer data) {
+  ViewmdHeading *h = (ViewmdHeading *)data;
+  if (h) {
+    g_free(h->text);
+    g_free(h->slug);
+    g_free(h);
+  }
+}
 MarkydEditor *markyd_editor_new(MarkydApp *app) {
   MarkydEditor *self = g_new0(MarkydEditor, 1);
 
@@ -509,9 +556,22 @@ MarkydEditor *markyd_editor_new(MarkydApp *app) {
   self->source_content = g_strdup("");
   self->file_path = NULL;
   self->collapsed = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
-                                          NULL);
+                                           NULL);
+  self->headings = g_ptr_array_new_with_free_func(viewmd_heading_free);
   self->updating_tags = FALSE;
   self->markdown_idle_id = 0;
+  self->scroll_anchor_offset = 0;
+  self->scroll_anchor_remainder = 0.0;
+  self->scroll_anchor_valid = FALSE;
+  self->scroll_anchor_heading_slug[0] = '\0';
+  self->scroll_anchor_heading_delta = 0;
+  self->anchor_restore_idle_id = 0;
+  self->scroll_anchor_restore_attempts = 0;
+  self->scroll_anchor_frozen = FALSE;
+  self->last_allocate_width = 0;
+  self->last_allocate_height = 0;
+  self->in_resize_pass = FALSE;
+  self->vadjustment = NULL;
 
   self->text_view = gtk_text_view_new();
   g_object_add_weak_pointer(G_OBJECT(self->text_view),
@@ -544,17 +604,241 @@ MarkydEditor *markyd_editor_new(MarkydApp *app) {
                    G_CALLBACK(on_leave_notify), self);
   g_signal_connect(self->text_view, "destroy",
                    G_CALLBACK(on_text_view_destroyed), self);
+  /* 'before' runs ahead of the default handler (old layout intact), 'after'
+     runs after the re-layout finished. */
   g_signal_connect(self->text_view, "size-allocate",
-                   G_CALLBACK(on_text_view_size_allocate), self);
+                    G_CALLBACK(on_text_view_size_allocate_before), self);
+  g_signal_connect_after(self->text_view, "size-allocate",
+                         G_CALLBACK(on_text_view_size_allocate_after), self);
 
   return self;
 }
 
-static void on_text_view_size_allocate(GtkWidget *widget, GtkAllocation *allocation,
-                                       gpointer user_data) {
+/* Y range of a heading's anchor line, or FALSE when the heading is not
+   currently rendered (e.g. inside a collapsed section). */
+static gboolean heading_line_yrange(MarkydEditor *self, const gchar *slug,
+                                    gint *out_y0, gint *out_y1) {
+  gchar *mark_name;
+  GtkTextMark *mark;
+  GtkTextIter iter;
+
+  if (!self || !self->text_view || !self->buffer || !slug || slug[0] == '\0') {
+    return FALSE;
+  }
+  mark_name = markdown_anchor_mark_name(slug);
+  mark = gtk_text_buffer_get_mark(self->buffer, mark_name);
+  g_free(mark_name);
+  if (!mark) {
+    return FALSE;
+  }
+  gtk_text_buffer_get_iter_at_mark(self->buffer, &iter, mark);
+  gtk_text_view_get_line_yrange(GTK_TEXT_VIEW(self->text_view), &iter, out_y0,
+                                out_y1);
+  return TRUE;
+}
+
+/* Buffer offset of the line currently at the top of the viewport. */
+static void update_scroll_anchor(MarkydEditor *self) {
+  GtkTextIter last_iter;
+  GtkTextIter line_iter;
+  gint last_y = 0;
+  gint last_height = 0;
+  gint line_top = 0;
+  gdouble layout_height;
+  gdouble value;
+  gint query_y;
+
+  if (!self || !self->vadjustment || !self->text_view || !self->buffer) {
+    return;
+  }
+
+  gtk_text_buffer_get_end_iter(self->buffer, &last_iter);
+  gtk_text_view_get_line_yrange(GTK_TEXT_VIEW(self->text_view), &last_iter, &last_y,
+                                &last_height);
+  layout_height = (gdouble)(last_y + last_height);
+  if (layout_height <= 0.0) {
+    return;
+  }
+
+  value = gtk_adjustment_get_value(self->vadjustment);
+  query_y = CLAMP((gint)value, 0, (gint)layout_height - 1);
+  gtk_text_view_get_line_at_y(GTK_TEXT_VIEW(self->text_view), &line_iter, query_y,
+                              &line_top);
+  self->scroll_anchor_offset = gtk_text_iter_get_offset(&line_iter);
+  /* Keep the sub-line remainder: restoring only the line top would round the
+     position to a line boundary on every resize and ratchet the view. */
+  self->scroll_anchor_remainder = CLAMP(value - line_top, 0.0, 512.0);
+
+  /* Remember which heading section the anchored line lives in, so a re-render
+     that changes the document can reconstruct the position from that
+     structural anchor instead of a now-meaningless buffer offset. */
+  self->scroll_anchor_heading_slug[0] = '\0';
+  self->scroll_anchor_heading_delta = 0;
+  if (self->headings) {
+    for (guint i = 0; i < self->headings->len; i++) {
+      ViewmdHeading *heading =
+          (ViewmdHeading *)g_ptr_array_index(self->headings, i);
+      gint heading_y0 = 0;
+      gint heading_y1 = 0;
+
+      if (!heading->slug ||
+          !heading_line_yrange(self, heading->slug, &heading_y0, &heading_y1)) {
+        continue;
+      }
+      if (heading_y0 > line_top) {
+        break;
+      }
+      g_strlcpy(self->scroll_anchor_heading_slug, heading->slug,
+                sizeof(self->scroll_anchor_heading_slug));
+      self->scroll_anchor_heading_delta = line_top - heading_y0;
+    }
+  }
+  self->scroll_anchor_valid = TRUE;
+}
+
+/* Bring the anchored line back to the top after a re-layout, clamped to the
+   end of the scrollable area (the documented limit of the anchor invariant).
+   When 'prefer_heading' is set and the document was re-rendered (a fold
+   toggle, reload, or settings change), the nearest heading is used as a
+   structural anchor so content changes above the viewport do not move it.
+   Returns FALSE when the requested position could not be reached yet because
+   the rebuilt document's scrollable height is still stale (the caller then
+   retries once the re-layout has settled). */
+static gboolean restore_scroll_anchor(MarkydEditor *self,
+                                      gboolean prefer_heading) {
+  GtkTextIter iter;
+  gint y0 = 0;
+  gint y1 = 0;
+  gdouble max_value;
+  gdouble target = 0.0;
+  gboolean have_target = FALSE;
+
+  if (!self->scroll_anchor_valid || !self->vadjustment || !self->text_view) {
+    return TRUE;
+  }
+
+  max_value = gtk_adjustment_get_upper(self->vadjustment) -
+              gtk_adjustment_get_page_size(self->vadjustment);
+
+  if (prefer_heading && self->scroll_anchor_heading_slug[0] != '\0') {
+    if (heading_line_yrange(self, self->scroll_anchor_heading_slug, &y0, &y1)) {
+      target = (gdouble)y0 + self->scroll_anchor_heading_delta;
+      have_target = TRUE;
+    }
+  }
+  if (!have_target) {
+    gtk_text_buffer_get_iter_at_offset(self->buffer, &iter,
+                                       self->scroll_anchor_offset);
+    gtk_text_view_get_line_yrange(GTK_TEXT_VIEW(self->text_view), &iter, &y0, &y1);
+    target = (gdouble)y0 + self->scroll_anchor_remainder;
+  }
+
+  if (fabs(target - gtk_adjustment_get_value(self->vadjustment)) < 0.5) {
+    return TRUE;
+  }
+  /* A target beyond the (possibly stale) scrollable range would be clamped;
+     report that so the caller can retry after the layout settles. */
+  if (target > max_value + 0.5) {
+    gtk_adjustment_set_value(self->vadjustment, MAX(max_value, 0.0));
+    return FALSE;
+  }
+  gtk_adjustment_set_value(self->vadjustment, target);
+  return fabs(target - gtk_adjustment_get_value(self->vadjustment)) < 1.0;
+}
+
+/* Restore runs from idle so the rebuilt buffer has been re-laid out; when the
+   new scrollable height is not ready yet, retry briefly until it settles. */
+static gboolean restore_scroll_anchor_idle(gpointer user_data) {
+  MarkydEditor *self = (MarkydEditor *)user_data;
+  gboolean done;
+
+  self->anchor_restore_idle_id = 0;
+  self->in_resize_pass = TRUE;
+  done = restore_scroll_anchor(self, TRUE);
+  if (!done && self->scroll_anchor_restore_attempts < 12) {
+    self->scroll_anchor_restore_attempts++;
+    self->anchor_restore_idle_id =
+        g_timeout_add(20, restore_scroll_anchor_idle, self);
+    self->in_resize_pass = FALSE;
+    return G_SOURCE_REMOVE;
+  }
+  update_scroll_anchor(self);
+  self->in_resize_pass = FALSE;
+  self->scroll_anchor_frozen = FALSE;
+  self->scroll_anchor_restore_attempts = 0;
+  return G_SOURCE_REMOVE;
+}
+
+static void schedule_scroll_anchor_restore(MarkydEditor *self) {
+  if (!self) {
+    return;
+  }
+  if (self->anchor_restore_idle_id != 0) {
+    g_source_remove(self->anchor_restore_idle_id);
+  }
+  self->scroll_anchor_restore_attempts = 0;
+  self->anchor_restore_idle_id =
+      g_idle_add(restore_scroll_anchor_idle, self);
+}
+
+static void on_vadjustment_value_changed(GtkAdjustment *adjustment,
+                                         gpointer user_data) {
+  MarkydEditor *self = (MarkydEditor *)user_data;
+  (void)adjustment;
+
+  if (!self || self->in_resize_pass || self->scroll_anchor_frozen ||
+      !self->vadjustment) {
+    return;
+  }
+  update_scroll_anchor(self);
+}
+
+static void on_text_view_size_allocate_before(GtkWidget *widget,
+                                              GtkAllocation *allocation,
+                                              gpointer user_data) {
+  MarkydEditor *self = (MarkydEditor *)user_data;
+  (void)widget;
+
+  if (!self || !self->text_view) {
+    return;
+  }
+
+  if (!self->vadjustment) {
+    GtkWidget *sw =
+        gtk_widget_get_ancestor(self->text_view, GTK_TYPE_SCROLLED_WINDOW);
+    if (sw && GTK_IS_SCROLLED_WINDOW(sw)) {
+      self->vadjustment =
+          gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(sw));
+      if (self->vadjustment) {
+        g_object_add_weak_pointer(G_OBJECT(self->vadjustment),
+                                  (gpointer *)&self->vadjustment);
+        g_signal_connect(self->vadjustment, "value-changed",
+                         G_CALLBACK(on_vadjustment_value_changed), self);
+      }
+    }
+  }
+
+  if (allocation->width != self->last_allocate_width ||
+      allocation->height != self->last_allocate_height) {
+    /* Runs before the default handler re-lays-out the view: capture the top
+       line while the pre-resize layout and adjustment are still intact. */
+    self->in_resize_pass = TRUE;
+    update_scroll_anchor(self);
+    self->last_allocate_width = allocation->width;
+    self->last_allocate_height = allocation->height;
+  }
+}
+
+static void on_text_view_size_allocate_after(GtkWidget *widget,
+                                             GtkAllocation *allocation,
+                                             gpointer user_data) {
   MarkydEditor *self = (MarkydEditor *)user_data;
   (void)widget;
   (void)allocation;
+  if (self->in_resize_pass) {
+    restore_scroll_anchor(self, FALSE);
+    self->in_resize_pass = FALSE;
+  }
   refresh_image_widget_scales(self);
 }
 
@@ -585,15 +869,30 @@ void markyd_editor_free(MarkydEditor *self) {
                                  (gpointer *)&self->text_view);
     self->text_view = NULL;
   }
+  if (self->vadjustment) {
+    g_signal_handlers_disconnect_by_func(
+        self->vadjustment, G_CALLBACK(on_vadjustment_value_changed), self);
+    g_object_remove_weak_pointer(G_OBJECT(self->vadjustment),
+                                 (gpointer *)&self->vadjustment);
+    self->vadjustment = NULL;
+  }
   if (self->markdown_idle_id != 0) {
     g_source_remove(self->markdown_idle_id);
     self->markdown_idle_id = 0;
+  }
+  if (self->anchor_restore_idle_id != 0) {
+    g_source_remove(self->anchor_restore_idle_id);
+    self->anchor_restore_idle_id = 0;
   }
   g_free(self->source_content);
   g_free(self->file_path);
   if (self->collapsed) {
     g_hash_table_destroy(self->collapsed);
     self->collapsed = NULL;
+  }
+  if (self->headings) {
+    g_ptr_array_free(self->headings, TRUE);
+    self->headings = NULL;
   }
   g_free(self);
 }
@@ -642,6 +941,19 @@ const gchar *markyd_editor_get_file_path(MarkydEditor *self) {
     return NULL;
   }
   return self->file_path;
+}
+
+void markyd_editor_scroll_to_anchor(MarkydEditor *self, const gchar *slug) {
+  if (self) {
+    scroll_to_markdown_anchor(self, slug);
+  }
+}
+
+const GPtrArray *markyd_editor_get_headings(MarkydEditor *self) {
+  if (!self) {
+    return NULL;
+  }
+  return self->headings;
 }
 
 GtkWidget *markyd_editor_get_widget(MarkydEditor *self) {

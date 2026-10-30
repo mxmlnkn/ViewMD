@@ -57,9 +57,17 @@ void markdown_update_accent_tags(GtkTextBuffer *buffer);
 
 /* Render markdown source into the buffer and apply markdown styling.
    'collapsed' is an optional GHashTable of heading/details keys that should
-   be rendered collapsed (or NULL to render everything expanded). */
+   be rendered collapsed (or NULL to render everything expanded).
+   'headings_out' is an optional GPtrArray (with -with-free func) that is
+   emptied then filled with ViewmdHeading* entries for the table of contents. */
+typedef struct {
+  gint level;
+  gchar *text;
+  gchar *slug;
+} ViewmdHeading;
+
 void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source,
-                         GHashTable *collapsed);
+                         GHashTable *collapsed, GPtrArray *headings_out);
 
 typedef struct {
   gint row;

@@ -26,6 +26,10 @@ typedef struct _MarkydWindow {
   GtkWidget *lbl_search_status;
   GtkWidget *lbl_title;
   GtkWidget *notebook;
+  GtkWidget *paned;
+  GtkWidget *btn_toc;
+  GtkWidget *toc_scroll;
+  GtkWidget *toc_list;
   GPtrArray *tabs; /* MarkydTab* */
   gint active_index;
   MarkydEditor *editor; /* active tab's editor */
