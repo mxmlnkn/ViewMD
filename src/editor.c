@@ -424,8 +424,12 @@ static void on_text_view_size_allocate(GtkWidget *widget, GtkAllocation *allocat
 }
 
 static void on_text_view_destroyed(GtkWidget *widget, gpointer user_data) {
+  /* GtkTextView clears its buffer on dispose and then sets text targets.
+     It is no longer a drop destination after we unset it, which would warn;
+     mark it as one again while the widget is still alive. */
+  gtk_drag_dest_set(widget, 0, NULL, 0, 0);
+
   MarkydEditor *self = (MarkydEditor *)user_data;
-  (void)widget;
   if (!self) {
     return;
   }
