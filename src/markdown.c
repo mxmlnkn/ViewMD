@@ -180,139 +180,6 @@ static GtkTextTag *lookup_tag(GtkTextBuffer *buffer, const gchar *name) {
   return table ? gtk_text_tag_table_lookup(table, name) : NULL;
 }
 
-static gboolean line_is_blank(const gchar *line, gsize len) {
-  for (gsize i = 0; i < len; i++) {
-    gchar ch = line[i];
-    if (ch == '\r') {
-      continue;
-    }
-    if (ch != ' ' && ch != '\t') {
-      return FALSE;
-    }
-  }
-  return TRUE;
-}
-
-static gboolean line_is_dash_rule(const gchar *line, gsize len) {
-  gsize i = 0;
-  guint dashes = 0;
-
-  while (i < len && (line[i] == ' ' || line[i] == '\t')) {
-    i++;
-  }
-
-  for (; i < len; i++) {
-    gchar ch = line[i];
-    if (ch == '\r') {
-      continue;
-    }
-    if (ch == '-') {
-      dashes++;
-      continue;
-    }
-    if (ch == ' ' || ch == '\t') {
-      continue;
-    }
-    return FALSE;
-  }
-
-  return dashes >= 3;
-}
-
-static gboolean line_is_fence(const gchar *line, gsize len, gchar *fence_ch,
-                              guint *fence_len) {
-  gsize i = 0;
-  gchar ch;
-  guint run = 0;
-
-  while (i < len && (line[i] == ' ' || line[i] == '\t')) {
-    i++;
-  }
-  if (i >= len) {
-    return FALSE;
-  }
-
-  ch = line[i];
-  if (ch != '`' && ch != '~') {
-    return FALSE;
-  }
-
-  while (i < len && line[i] == ch) {
-    run++;
-    i++;
-  }
-
-  if (run < 3) {
-    return FALSE;
-  }
-
-  if (fence_ch) {
-    *fence_ch = ch;
-  }
-  if (fence_len) {
-    *fence_len = run;
-  }
-  return TRUE;
-}
-
-static gchar *normalize_markdown_source(const gchar *source) {
-  const gchar *p;
-  GString *out;
-  gboolean prev_nonblank = FALSE;
-  gboolean in_fence = FALSE;
-  gchar active_fence_ch = 0;
-  guint active_fence_len = 0;
-
-  if (!source || source[0] == '\0') {
-    return g_strdup("");
-  }
-
-  out = g_string_new(NULL);
-  p = source;
-
-  while (*p != '\0') {
-    const gchar *line_start = p;
-    const gchar *line_end = strchr(p, '\n');
-    gsize line_len = line_end ? (gsize)(line_end - line_start)
-                              : strlen(line_start);
-    gboolean has_nl = (line_end != NULL);
-    gboolean is_blank = line_is_blank(line_start, line_len);
-    gboolean is_rule = FALSE;
-    gchar fence_ch = 0;
-    guint fence_len = 0;
-
-    if (line_is_fence(line_start, line_len, &fence_ch, &fence_len)) {
-      if (!in_fence) {
-        in_fence = TRUE;
-        active_fence_ch = fence_ch;
-        active_fence_len = fence_len;
-      } else if (fence_ch == active_fence_ch && fence_len >= active_fence_len) {
-        in_fence = FALSE;
-      }
-    }
-
-    if (!in_fence) {
-      is_rule = line_is_dash_rule(line_start, line_len);
-    }
-
-    if (is_rule && prev_nonblank) {
-      g_string_append_c(out, '\n');
-    }
-
-    g_string_append_len(out, line_start, line_len);
-    if (has_nl) {
-      g_string_append_c(out, '\n');
-      p = line_end + 1;
-    } else {
-      p = line_start + line_len;
-    }
-
-    prev_nonblank = !is_blank;
-  }
-
-  return g_string_free(out, FALSE);
-}
-
 static void update_newline_state(RenderCtx *ctx, const gchar *text, gsize len) {
   if (!ctx || !text || len == 0) {
     return;
@@ -1618,7 +1485,7 @@ void markdown_apply_tags(GtkTextBuffer *buffer, const gchar *source) {
   ctx.render_state = reset_render_state(buffer);
   gtk_text_buffer_set_text(buffer, "", -1);
   input = source ? source : "";
-  normalized_source = normalize_markdown_source(input);
+  normalized_source = g_strdup(input);
 
   ctx.buffer = buffer;
   ctx.active_tags = g_ptr_array_new();
