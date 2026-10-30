@@ -14,6 +14,7 @@ static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event,
 static gboolean on_leave_notify(GtkWidget *widget, GdkEventCrossing *event,
                                 gpointer user_data);
 static void on_view_source_activate(GtkMenuItem *item, gpointer user_data);
+static void on_copy_source_activate(GtkMenuItem *item, gpointer user_data);
 static void on_populate_popup(GtkTextView *text_view, GtkWidget *menu,
                               gpointer user_data);
 static void on_text_view_destroyed(GtkWidget *widget, gpointer user_data);
@@ -1616,6 +1617,23 @@ static void on_view_source_activate(GtkMenuItem *item, gpointer user_data) {
   g_free(source);
 }
 
+static void on_copy_source_activate(GtkMenuItem *item, gpointer user_data) {
+  MarkydEditor *self = (MarkydEditor *)user_data;
+  GtkClipboard *clipboard;
+  gchar *source;
+
+  (void)item;
+  if (!self) {
+    return;
+  }
+  source = markyd_editor_get_content(self);
+  clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+  gtk_clipboard_set_text(clipboard, source ? source : "", -1);
+  /* Keep the copied text available after the viewer exits. */
+  gtk_clipboard_store(clipboard);
+  g_free(source);
+}
+
 static void on_populate_popup(GtkTextView *text_view, GtkWidget *menu,
                               gpointer user_data) {
   MarkydEditor *self = (MarkydEditor *)user_data;
@@ -1626,6 +1644,13 @@ static void on_populate_popup(GtkTextView *text_view, GtkWidget *menu,
   gtk_widget_set_tooltip_text(item,
                               "Show the raw markdown of this document");
   g_signal_connect(item, "activate", G_CALLBACK(on_view_source_activate), self);
+  gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+  gtk_widget_show(item);
+
+  item = gtk_menu_item_new_with_label("Copy Source");
+  gtk_widget_set_tooltip_text(item,
+                              "Copy the raw markdown of this document");
+  g_signal_connect(item, "activate", G_CALLBACK(on_copy_source_activate), self);
   gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
   gtk_widget_show(item);
 }
