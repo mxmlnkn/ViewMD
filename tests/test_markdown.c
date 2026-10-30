@@ -1,6 +1,377 @@
-#include "config.h"
-#include "markdown.h"
+#include <gtk/gtk.h>
+#include <glib.h>
 #include <string.h>
+
+#include "markdown.h"
+#include "code_highlight.h"
+#include "config.h"
+
+/* Headless tests for the renderer logic. They drive markdown_apply_tags
+   against a plain GtkTextBuffer, which needs no window or display. */
+
+
+static GtkTextBuffer *render_buffer(const gchar *source, GHashTable *collapsed,
+                                    GPtrArray *headings_out) {
+  GtkTextBuffer *buffer = gtk_text_buffer_new(NULL);
+  markdown_init_tags(buffer);
+  markdown_apply_tags(buffer, source, collapsed, headings_out);
+  return buffer;
+}
+
+static gchar *buffer_text(GtkTextBuffer *buffer, gboolean include_hidden) {
+  GtkTextIter start, end;
+  gtk_text_buffer_get_bounds(buffer, &start, &end);
+  return gtk_text_buffer_get_text(buffer, &start, &end, include_hidden);
+}
+
+static gboolean has_anchor_with_data(GtkTextBuffer *buffer,
+                                     const gchar *data_key) {
+  GtkTextIter iter, end;
+  gtk_text_buffer_get_bounds(buffer, &iter, &end);
+  while (!gtk_text_iter_equal(&iter, &end)) {
+    GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(&iter);
+    if (anchor && g_object_get_data(G_OBJECT(anchor), data_key) != NULL) {
+      return TRUE;
+    }
+    gtk_text_iter_forward_char(&iter);
+  }
+  return FALSE;
+}
+
+static gboolean mark_exists(GtkTextBuffer *buffer, const gchar *name) {
+  return gtk_text_buffer_get_mark(buffer, name) != NULL;
+}
+
+static void test_slug_normalization(void) {
+  g_assert_cmpstr(markdown_normalize_anchor_slug("Hello World"), ==,
+                  "hello-world");
+  g_assert_cmpstr(markdown_normalize_anchor_slug("C++ & C"), ==, "c-c");
+  g_assert_cmpstr(markdown_normalize_anchor_slug("UPPER_case"), ==,
+                  "upper-case");
+  g_assert_cmpstr(markdown_normalize_anchor_slug(" a b "), ==, "a-b");
+}
+
+static void test_frontmatter_table(void) {
+  const gchar *source =
+      "---\ntitle: My Doc\nauthor: Kilo\ntags: markdown, test\n---\n\n"
+      "# Heading\n\nBody paragraph.\n";
+  GtkTextBuffer *buffer;
+  gchar *visible;
+  gchar *all;
+
+  buffer = render_buffer(source, NULL, NULL);
+  visible = buffer_text(buffer, FALSE);
+  all = buffer_text(buffer, TRUE);
+
+  g_assert_nonnull(strstr(visible, "Heading"));
+  g_assert_nonnull(strstr(visible, "Body paragraph."));
+  /* The frontmatter itself must not render as visible body text. */
+  g_assert_true(strstr(visible, "My Doc") == NULL);
+  /* ...but the values stay searchable through the hidden text. */
+  g_assert_nonnull(strstr(all, "My Doc"));
+  g_assert_nonnull(strstr(all, "Kilo"));
+
+  g_assert_true(has_anchor_with_data(buffer, VIEWMD_FRONTMATTER_DATA));
+
+  g_free(visible);
+  g_free(all);
+  g_object_unref(buffer);
+}
+
+static void test_setext_heading(void) {
+  /* Setext H1/H2: `Title\n===` / `Title\n---` must render as a heading,
+     not as paragraph + thematic break. */
+  GtkTextBuffer *buffer;
+  gchar *visible;
+
+  buffer = render_buffer("Title\n---\n\nBody.\n", NULL, NULL);
+  visible = buffer_text(buffer, TRUE);
+
+  g_assert_nonnull(strstr(visible, "Title"));
+  g_assert_nonnull(strstr(visible, "Body."));
+  /* The --- underline must be consumed by Setext, not appear as text. */
+  g_assert_true(strstr(visible, "---") == NULL);
+  /* The heading mark was created, proving it parsed as a heading. */
+  g_assert_true(mark_exists(buffer, "viewmd-anchor-title"));
+
+  g_free(visible);
+  g_object_unref(buffer);
+}
+
+static void test_details_override(void) {
+  /* <details> has no id in the source; the transform numbers them by line, so
+     the first one is details-0. An explicit map entries overrides the
+     collapsed-by-default / <open> defaults. */
+  const gchar *source = "<details>\n<summary>One</summary>\n\nHidden.\n\n"
+                        "</details>\n";
+  GHashTable *collapsed;
+  GtkTextBuffer *buffer;
+  gchar *text;
+
+  collapsed = g_hash_table_new(g_str_hash, g_str_equal);
+
+  /* No entry -> default collapsed. */
+  buffer = render_buffer(source, collapsed, NULL);
+  text = buffer_text(buffer, TRUE);
+  g_assert_true(strstr(text, "Hidden.") == NULL);
+  g_free(text);
+  g_object_unref(buffer);
+
+  /* Explicit FALSE -> expanded. */
+  g_hash_table_insert(collapsed, g_strdup("details-0"), GINT_TO_POINTER(FALSE));
+  buffer = render_buffer(source, collapsed, NULL);
+  text = buffer_text(buffer, TRUE);
+  g_assert_nonnull(strstr(text, "Hidden."));
+  g_free(text);
+  g_object_unref(buffer);
+
+  /* Explicit TRUE -> stays collapsed. */
+  g_hash_table_replace(collapsed, g_strdup("details-0"), GINT_TO_POINTER(TRUE));
+  buffer = render_buffer(source, collapsed, NULL);
+  text = buffer_text(buffer, TRUE);
+  g_assert_true(strstr(text, "Hidden.") == NULL);
+  g_free(text);
+  g_object_unref(buffer);
+
+  g_hash_table_destroy(collapsed);
+}
+
+static void test_details_collapsed_by_default(void) {
+  const gchar *source =
+      "# Top\n\n<details>\n<summary>Click to expand</summary>\n\n"
+      "Hidden paragraph.\n\n</details>\n\n<details open>\n"
+      "<summary>Open details</summary>\n\nVisible content.\n</details>\n";
+  GtkTextBuffer *buffer;
+  gchar *text;
+
+  buffer = render_buffer(source, NULL, NULL);
+  text = buffer_text(buffer, TRUE);
+
+  g_assert_nonnull(strstr(text, "Click to expand"));
+  g_assert_true(strstr(text, "Hidden paragraph") == NULL);
+  g_assert_nonnull(strstr(text, "Open details"));
+  g_assert_nonnull(strstr(text, "Visible content."));
+
+  g_free(text);
+  g_object_unref(buffer);
+}
+
+static void test_heading_collapse(void) {
+  const gchar *source =
+      "# Top\n\n## Section A\n\nContent of section A.\n\n"
+      "### Sub of A\n\nDeeper.\n\n## Section B\n\nContent of section B.\n";
+  GHashTable *collapsed;
+  GtkTextBuffer *buffer;
+  gchar *text;
+
+  collapsed = g_hash_table_new(g_str_hash, g_str_equal);
+  g_hash_table_insert(collapsed, g_strdup("section-a"), GINT_TO_POINTER(TRUE));
+
+  buffer = render_buffer(source, collapsed, NULL);
+  text = buffer_text(buffer, TRUE);
+
+  g_assert_nonnull(strstr(text, "Section A"));
+  g_assert_true(strstr(text, "Content of section A") == NULL);
+  g_assert_true(strstr(text, "Deeper") == NULL);
+  g_assert_nonnull(strstr(text, "Section B"));
+  g_assert_nonnull(strstr(text, "Content of section B"));
+
+  g_free(text);
+  g_object_unref(buffer);
+  g_hash_table_destroy(collapsed);
+}
+
+static void test_heading_collapse_with_details(void) {
+  /* A <details> block inside a collapsed section must not leak its pending
+     summary into the next section (which would swallow it). */
+  const gchar *source =
+      "# Alpha\n\nAlpha intro.\n\n<details>\n<summary>Summary</summary>\n\n"
+      "Hidden detail.\n\n</details>\n\n## Alpha Sub\n\nSub content.\n\n"
+      "# Beta\n\nBeta content that must survive.\n";
+  GHashTable *collapsed;
+  GtkTextBuffer *buffer;
+  gchar *text;
+
+  collapsed = g_hash_table_new(g_str_hash, g_str_equal);
+  g_hash_table_insert(collapsed, g_strdup("alpha"), GINT_TO_POINTER(TRUE));
+
+  buffer = render_buffer(source, collapsed, NULL);
+  text = buffer_text(buffer, TRUE);
+
+  g_assert_nonnull(strstr(text, "Alpha"));
+  g_assert_true(strstr(text, "Hidden detail") == NULL);
+  g_assert_nonnull(strstr(text, "Beta"));
+  g_assert_nonnull(strstr(text, "Beta content that must survive"));
+
+  g_free(text);
+  g_object_unref(buffer);
+  g_hash_table_destroy(collapsed);
+}
+
+static void test_heading_toc(void) {
+  const gchar *source = "# Title\n\n## Section Two\n\n### Sub Three\n";
+  GPtrArray *headings;
+  GtkTextBuffer *buffer;
+  ViewmdHeading *h;
+
+  headings = g_ptr_array_new();
+  buffer = render_buffer(source, NULL, headings);
+
+  g_assert_cmpuint(headings->len, ==, 3);
+  h = g_ptr_array_index(headings, 0);
+  g_assert_cmpint(h->level, ==, 1);
+  g_assert_cmpstr(h->text, ==, "Title");
+  g_assert_cmpstr(h->slug, ==, "title");
+
+  h = g_ptr_array_index(headings, 1);
+  g_assert_cmpint(h->level, ==, 2);
+  g_assert_cmpstr(h->text, ==, "Section Two");
+  g_assert_cmpstr(h->slug, ==, "section-two");
+
+  h = g_ptr_array_index(headings, 2);
+  g_assert_cmpint(h->level, ==, 3);
+  g_assert_cmpstr(h->slug, ==, "sub-three");
+
+  g_assert_true(mark_exists(buffer, "viewmd-anchor-title"));
+  for (guint i = 0; i < headings->len; i++) {
+    ViewmdHeading *he = g_ptr_array_index(headings, i);
+    g_free(he->text);
+    g_free(he->slug);
+    g_free(he);
+  }
+  g_ptr_array_free(headings, TRUE);
+  g_object_unref(buffer);
+}
+
+static void test_soft_break_folding(void) {
+  /* A single newline inside a paragraph is a soft break and must render as a
+     space, not a line break. New paragraphs and explicit hard breaks keep
+     their real newlines. */
+  const gchar *source = "line one\nline two\nline three\n\nnext para  \n"
+                        "after hard break\n";
+  GtkTextBuffer *buffer;
+  gchar *text;
+
+  buffer = render_buffer(source, NULL, NULL);
+  text = buffer_text(buffer, FALSE);
+
+  g_assert_nonnull(strstr(text, "line one line two line three"));
+  g_assert_true(strstr(text, "line three\n") != NULL);
+  /* The soft breaks must not leave a stray newline inside the paragraph. */
+  g_assert_true(strstr(text, "line one\n") == NULL);
+  g_assert_true(strstr(text, "line two\n") == NULL);
+  /* The hard break (two trailing spaces) survives. */
+  g_assert_nonnull(strstr(text, "next para\nafter hard break"));
+
+  g_free(text);
+  g_object_unref(buffer);
+}
+
+static void test_details_in_fence(void) {
+  /* <details> inside a fenced code block is literal code, not a fold. */
+  const gchar *source = "```html\n<details>\n<summary>X</summary>\n"
+                        "</details>\n```\n\nAfter.\n";
+  GtkTextBuffer *buffer;
+  gchar *text;
+
+  buffer = render_buffer(source, NULL, NULL);
+  text = buffer_text(buffer, TRUE);
+
+  g_assert_nonnull(strstr(text, "<details>"));
+  g_assert_null(strstr(text, "<!--vmd-details"));
+  g_assert_null(strstr(text, "###### X"));
+  g_assert_nonnull(strstr(text, "After."));
+
+  g_free(text);
+  g_object_unref(buffer);
+}
+
+static void test_details_after_fence_info(void) {
+  /* A line like ```js inside a ```text block is content, not a close. */
+  const gchar *source = "```text\n```js\nHELLO\n```\n\n<details>\n"
+                        "<summary>Fold</summary>\n\nHidden.\n\n</details>\n";
+  GtkTextBuffer *buffer;
+  gchar *text;
+
+  buffer = render_buffer(source, NULL, NULL);
+  text = buffer_text(buffer, TRUE);
+
+  g_assert_nonnull(strstr(text, "```js"));
+  g_assert_nonnull(strstr(text, "Fold"));
+  g_assert_null(strstr(text, "Hidden."));
+
+  g_free(text);
+  g_object_unref(buffer);
+}
+
+static void test_frontmatter_empty_values(void) {
+  /* A recognized frontmatter block stays hidden even if all values are empty. */
+  const gchar *source = "---\ntitle:\n---\n\n# Heading\n";
+  GtkTextBuffer *buffer;
+  gchar *text;
+
+  buffer = render_buffer(source, NULL, NULL);
+  text = buffer_text(buffer, TRUE);
+
+  g_assert_null(strstr(text, "title:"));
+  g_assert_nonnull(strstr(text, "Heading"));
+
+  g_free(text);
+  g_object_unref(buffer);
+}
+
+static void test_codeblock_searchable_text(void) {
+  const gchar *source = "# Doc\n\n```c\nint main(void) { return 0; }\n```\n";
+  GtkTextBuffer *buffer;
+  gchar *text;
+
+  buffer = render_buffer(source, NULL, NULL);
+  text = buffer_text(buffer, TRUE);
+
+  /* Code is kept findable: its text lives (invisibly) in the buffer. */
+  g_assert_nonnull(strstr(text, "int main"));
+  g_assert_true(has_anchor_with_data(buffer, VIEWMD_CODE_BLOCK_DATA));
+
+  g_free(text);
+  g_object_unref(buffer);
+}
+
+/* Tokenizer checks for the syntax highlighter. */
+typedef struct {
+  gboolean seen_return;
+  gboolean seen_int;
+  gboolean seen_literal;
+} TokenProbe;
+
+static void on_token(gint start, gint end, const gchar *tag,
+                     gpointer user_data) {
+  (void)start;
+  (void)end;
+  TokenProbe *probe = (TokenProbe *)user_data;
+  if (g_strcmp0(tag, MARKYD_TAG_CODE_KW_A) == 0) {
+    probe->seen_return = TRUE;
+  } else if (g_strcmp0(tag, MARKYD_TAG_CODE_KW_C) == 0) {
+    probe->seen_int = TRUE;
+  } else if (g_strcmp0(tag, MARKYD_TAG_CODE_LITERAL) == 0) {
+    probe->seen_literal = TRUE;
+  }
+}
+
+static void test_c_tokenizer(void) {
+  const MarkydLanguageHighlight *lang = markyd_code_lookup_language("c");
+  MarkydCodeScanState state = {0};
+  TokenProbe probe = {FALSE, FALSE, FALSE};
+
+  g_assert_nonnull(lang);
+  markyd_code_scan_state_reset(&state);
+  markyd_code_scan_line(lang, "int main(void) { return 0; }", &state,
+                        on_token, &probe);
+  g_assert_true(probe.seen_return);
+  g_assert_true(probe.seen_int);
+  g_assert_true(probe.seen_literal);
+
+  g_assert_null(markyd_code_lookup_language("nosuchlanguage"));
+}
 
 static GtkTextBuffer *new_buffer(void) {
   GtkTextBuffer *buffer = gtk_text_buffer_new(NULL);
@@ -8,17 +379,17 @@ static GtkTextBuffer *new_buffer(void) {
   return buffer;
 }
 
-static gchar *buffer_text(GtkTextBuffer *buffer) {
-  GtkTextIter start, end;
-  gtk_text_buffer_get_bounds(buffer, &start, &end);
-  return gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
-}
-
 static void assert_text(GtkTextBuffer *buffer, const gchar *expected) {
-  gchar *text = buffer_text(buffer);
+  gchar *text = buffer_text(buffer, FALSE);
   g_assert_cmpstr(text, ==, expected);
   g_free(text);
 }
+
+static void upstream_apply(GtkTextBuffer *buffer, const gchar *source) {
+  markdown_apply_tags(buffer, source, NULL, NULL);
+}
+
+#define markdown_apply_tags(buffer, source) upstream_apply((buffer), (source))
 
 static void test_reload_link_tags(void) {
   GtkTextBuffer *buffer = new_buffer();
@@ -129,7 +500,7 @@ static void test_ordered_tasks(void) {
 static void test_task_hanging_indent(void) {
   GtkTextBuffer *buffer = new_buffer();
   markdown_apply_tags(buffer, "- [ ] Task\n  continuation\n");
-  assert_text(buffer, "☐ Task\ncontinuation\n");
+  assert_text(buffer, "☐ Task continuation\n");
   GtkTextIter at;
   gtk_text_buffer_get_start_iter(buffer, &at);
   GSList *tags = gtk_text_iter_get_tags(&at);
@@ -180,12 +551,20 @@ static void test_entity_literals(void) {
   g_object_unref(buffer);
 }
 
+static void assert_hidden_contains(GtkTextBuffer *buffer, const gchar *needle) {
+  gchar *text = buffer_text(buffer, TRUE);
+  g_assert_nonnull(strstr(text, needle));
+  g_free(text);
+}
+
 static void test_entities_in_code(void) {
   GtkTextBuffer *buffer = new_buffer();
+  /* Code blocks are child widgets; their source lives in hidden text. */
   markdown_apply_tags(buffer, "`&copy; &#169;`\n\n```\n&amp; &#x2014;\n```\n");
-  assert_text(buffer, "&copy; &#169;\n\n&amp; &#x2014;\n");
+  assert_hidden_contains(buffer, "&copy; &#169;");
+  assert_hidden_contains(buffer, "&amp; &#x2014;");
   markdown_apply_tags(buffer, "    &copy; &#169;\n");
-  assert_text(buffer, "&copy; &#169;\n");
+  assert_hidden_contains(buffer, "&copy; &#169;");
   g_object_unref(buffer);
 }
 
@@ -238,16 +617,16 @@ static void test_entities_in_headings_and_tables(void) {
   g_object_unref(buffer);
 }
 
+
+#undef markdown_apply_tags
+
 int main(int argc, char **argv) {
-  g_test_init(&argc, &argv, NULL);
-  gtk_init_check(&argc, &argv);
-  /* GtkTextBuffer works without a display. Register the boxed color types
-   * normally registered by a successful GTK display initialization. */
-  G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-  g_type_ensure(GDK_TYPE_COLOR);
-  G_GNUC_END_IGNORE_DEPRECATIONS
-  g_type_ensure(GDK_TYPE_RGBA);
+  gtk_init_check(NULL, NULL);
+
   config = config_new();
+  config_apply_theme_colors(config);
+
+  g_test_init(&argc, &argv, NULL);
 
   g_test_add_func("/markdown/reload/link-tags", test_reload_link_tags);
   g_test_add_func("/markdown/reload/heading-anchors", test_reload_heading_anchors);
@@ -263,7 +642,30 @@ int main(int argc, char **argv) {
   g_test_add_func("/markdown/entities/code", test_entities_in_code);
   g_test_add_func("/markdown/entities/attributes", test_entity_attributes);
   g_test_add_func("/markdown/entities/headings-and-tables", test_entities_in_headings_and_tables);
-  gint result = g_test_run();
-  config_free(config);
-  return result;
+  g_test_add_func("/markdown/slug-normalization", test_slug_normalization);
+  g_test_add_func("/markdown/frontmatter-table", test_frontmatter_table);
+  g_test_add_func("/markdown/details-collapsed-by-default",
+                  test_details_collapsed_by_default);
+  g_test_add_func("/markdown/details-override", test_details_override);
+  g_test_add_func("/markdown/setext-heading", test_setext_heading);
+  g_test_add_func("/markdown/heading-collapse", test_heading_collapse);
+  g_test_add_func("/markdown/heading-collapse-with-details",
+                  test_heading_collapse_with_details);
+  g_test_add_func("/markdown/heading-toc", test_heading_toc);
+  g_test_add_func("/markdown/soft-break-folding", test_soft_break_folding);
+  g_test_add_func("/markdown/details-in-fence", test_details_in_fence);
+  g_test_add_func("/markdown/details-after-fence-info",
+                  test_details_after_fence_info);
+  g_test_add_func("/markdown/frontmatter-empty-values",
+                  test_frontmatter_empty_values);
+  g_test_add_func("/markdown/codeblock-searchable-text",
+                  test_codeblock_searchable_text);
+  g_test_add_func("/code/c-tokenizer", test_c_tokenizer);
+
+  {
+    gint result = g_test_run();
+    config_free(config);
+    config = NULL;
+    return result;
+  }
 }

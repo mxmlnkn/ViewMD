@@ -21,12 +21,6 @@ applicationsdir ?= $(datadir)/applications
 
 all: $(TARGET)
 
-test: $(OBJDIR)/test-markdown
-	./$(OBJDIR)/test-markdown
-
-$(OBJDIR)/test-markdown: tests/test_markdown.c $(OBJDIR)/markdown.o $(OBJDIR)/code_highlight.o $(OBJDIR)/config.o $(OBJDIR)/md4c.o $(SRCDIR)/markdown.h $(SRCDIR)/config.h
-	$(CC) $(CFLAGS) -I$(SRCDIR) tests/test_markdown.c $(OBJDIR)/markdown.o $(OBJDIR)/code_highlight.o $(OBJDIR)/config.o $(OBJDIR)/md4c.o -o $@ $(LDFLAGS)
-
 $(TARGET): $(OBJECTS)
 	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
 
@@ -40,7 +34,21 @@ $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
 clean:
-	rm -rf $(OBJDIR) $(TARGET)
+	rm -rf $(OBJDIR) $(TARGET) $(TESTBIN)
+
+# Headless unit tests for the renderer and syntax-highlighting logic.
+TESTOBJS = $(OBJDIR)/test_markdown.o $(OBJDIR)/markdown.o \
+           $(OBJDIR)/code_highlight.o $(OBJDIR)/config.o $(OBJDIR)/md4c.o
+TESTBIN = $(BINDIR)/test_markdown
+
+$(TESTBIN): $(TESTOBJS)
+	$(CC) $(TESTOBJS) -o $@ $(LDFLAGS)
+
+test: $(TESTBIN)
+	./$(TESTBIN)
+
+$(OBJDIR)/test_markdown.o: tests/test_markdown.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -Isrc -c $< -o $@
 
 install: $(TARGET)
 	install -Dm755 $(TARGET) $(DESTDIR)$(bindir)/viewmd
