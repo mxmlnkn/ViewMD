@@ -675,12 +675,12 @@ MarkydWindow *markyd_window_new(MarkydApp *app) {
 
   self->btn_open =
       gtk_button_new_from_icon_name("document-open-symbolic", GTK_ICON_SIZE_BUTTON);
-  gtk_widget_set_tooltip_text(self->btn_open, "Open Markdown Document");
+  gtk_widget_set_tooltip_text(self->btn_open, "Open a markdown document (Ctrl+O)");
   g_signal_connect(self->btn_open, "clicked", G_CALLBACK(on_open_clicked), self);
 
   self->btn_refresh =
       gtk_button_new_from_icon_name("view-refresh-symbolic", GTK_ICON_SIZE_BUTTON);
-  gtk_widget_set_tooltip_text(self->btn_refresh, "Reload Current Document");
+  gtk_widget_set_tooltip_text(self->btn_refresh, "Reload document (F5)");
   g_signal_connect(self->btn_refresh, "clicked", G_CALLBACK(on_refresh_clicked),
                    self);
 
@@ -1023,8 +1023,31 @@ static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event,
   }
 
   if ((event->state & GDK_CONTROL_MASK) != 0 &&
+      (event->keyval == GDK_KEY_w || event->keyval == GDK_KEY_W)) {
+    gtk_window_close(GTK_WINDOW(widget));
+    return TRUE;
+  }
+
+  if ((event->state & GDK_CONTROL_MASK) != 0 &&
+      (event->keyval == GDK_KEY_q || event->keyval == GDK_KEY_Q)) {
+    gtk_window_close(GTK_WINDOW(widget));
+    return TRUE;
+  }
+
+  if ((event->state & GDK_CONTROL_MASK) != 0 &&
+      (event->keyval == GDK_KEY_o || event->keyval == GDK_KEY_O)) {
+    on_open_clicked(NULL, self);
+    return TRUE;
+  }
+
+  if ((event->state & GDK_CONTROL_MASK) != 0 &&
       (event->keyval == GDK_KEY_f || event->keyval == GDK_KEY_F)) {
     show_search_ui(self);
+    return TRUE;
+  }
+
+  if (event->keyval == GDK_KEY_F5) {
+    on_refresh_clicked(NULL, self);
     return TRUE;
   }
 
